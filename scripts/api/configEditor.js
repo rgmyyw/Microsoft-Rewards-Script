@@ -254,7 +254,14 @@ export function readConfig(projectRoot) {
 }
 
 export function writeConfigAtomic(projectRoot, cfg) {
-    const target = resolveConfigPath(projectRoot)
+    let target = resolveConfigPath(projectRoot)
+    try {
+        // config.json 在容器内是指向挂载卷 config/config.json 的符号链接;
+        // 原子 rename 会把链接替换成容器层实体文件, 改动随重建丢失 —— 先解析真实路径
+        target = fs.realpathSync(target)
+    } catch {
+        // 目标不存在时按原路径写入
+    }
     if (fs.existsSync(target)) {
         try {
             fs.copyFileSync(target, `${target}.bak`)
