@@ -10,6 +10,8 @@ services:
         volumes:
             - ./config:/usr/src/microsoft-rewards-script/config
             - ./sessions:/usr/src/microsoft-rewards-script/sessions
+            # Run logs land here (daily files, 90-day retention built into the logger)
+            - ./logs:/usr/src/microsoft-rewards-script/logs
         env_file:
             # Load account credentials from the .env file (ACCOUNT_1_EMAIL, optional ACCOUNT_1_PASSWORD, etc.)
             - path: .env
