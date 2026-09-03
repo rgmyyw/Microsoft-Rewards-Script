@@ -2035,7 +2035,7 @@ function pullLogs() {
   fetch(API.accountLogs + '?user=' + encodeURIComponent(logsTag))
     .then(function (r) { return r.json(); })
     .then(function (d) {
-      $('logsBox').textContent = (d.lines && d.lines.length) ? d.lines.join('\n') : '暂无日志（该账号尚未在本容器生命周期内产生事件，或容器刚重建）';
+      $('logsBox').textContent = (d.lines && d.lines.length) ? d.lines.join('\\n') : '暂无日志（该账号尚未在本容器生命周期内产生事件，或容器刚重建）';
     })
     .catch(function () {});
 }
