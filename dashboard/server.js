@@ -891,7 +891,7 @@ const server = http.createServer(async (req, res) => {
       try { body = await readBody(req); } catch (e) { body = {}; }
       const email = String(body.email || '').trim().toLowerCase();
       const password = String(body.password || '');
-      const geoLocale = String(body.geoLocale || 'gb').trim() || 'gb';
+      const geoLocale = String(body.geoLocale || 'cn').trim() || 'cn';
       const totpSecret = String(body.totpSecret || '').trim();
       if (!/^\S+@\S+\.\S+$/.test(email)) return json(res, 400, { error: '邮箱格式不正确' });
       if (!password) return json(res, 400, { error: '密码不能为空' });
@@ -1159,9 +1159,9 @@ const HTML = `<!DOCTYPE html>
       <div>
         <div class="field"><label>邮箱</label><input type="text" id="naEmail" placeholder="user@example.com"></div>
         <div class="field"><label>密码</label><div class="pw-row"><input type="password" id="naPass" placeholder="微软账号密码"><button type="button" class="eye" onclick="togglePass('naPass',this)">👁</button></div></div>
-        <div class="field"><label>地区（搜索词源相关，默认 gb 与现有账号一致）</label>
+        <div class="field"><label>地区（搜索环境语言/市场，默认国区 cn）</label>
           <select id="naGeo" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:14px;margin-top:4px">
-            <option value="gb" selected>gb（英国）</option><option value="us">us（美国）</option><option value="auto">auto（自动）</option><option value="de">de</option><option value="fr">fr</option><option value="jp">jp</option><option value="ca">ca</option><option value="au">au</option>
+            <option value="cn" selected>cn（国区）</option><option value="gb">gb（英国）</option><option value="us">us（美国）</option><option value="auto">auto（自动）</option><option value="de">de</option><option value="fr">fr</option><option value="jp">jp</option><option value="ca">ca</option><option value="au">au</option>
           </select>
         </div>
         <div class="field"><label>2FA 密钥（无则留空）</label><input type="text" id="naTotp" placeholder="可选"></div>
