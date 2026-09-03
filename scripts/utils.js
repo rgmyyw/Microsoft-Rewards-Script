@@ -204,6 +204,7 @@ function envBoolWithLegacy(primary, legacy, fallback) {
 export function loadAccountsFromEnv(projectRoot) {
     loadEnvFile(projectRoot)
 
+    const extras = readRawExtraAccounts(projectRoot)
     const accounts = []
     for (const index of accountIndexesFromEnv()) {
         const idx = String(index)
@@ -229,9 +230,16 @@ export function loadAccountsFromEnv(projectRoot) {
                 desktop: envBool(`ACCOUNT_${idx}_SAVE_FINGERPRINT_DESKTOP`, false)
             }
         })
+
+        const override = extras.find(e => e.email.toLowerCase() === email.toLowerCase())
+        if (override) applyExtraOverride(accounts[accounts.length - 1], override)
     }
 
-    return accounts.concat(loadExtraAccounts(projectRoot))
+    for (const raw of extras) {
+        if (accounts.some(a => a.email.toLowerCase() === raw.email.toLowerCase())) continue
+        accounts.push(normalizeExtraStandalone(raw))
+    }
+    return accounts
 }
 
 export function getExtraAccountsPath(projectRoot) {
@@ -239,7 +247,7 @@ export function getExtraAccountsPath(projectRoot) {
 }
 
 // 动态账号(看板"账号管理"维护, 免重启): config/accounts.extra.json
-export function loadExtraAccounts(projectRoot) {
+export function readRawExtraAccounts(projectRoot) {
     const filePath = getExtraAccountsPath(projectRoot)
     try {
         if (!fs.existsSync(filePath)) return []
@@ -247,19 +255,33 @@ export function loadExtraAccounts(projectRoot) {
         if (!Array.isArray(parsed)) return []
         return parsed
             .filter(entry => entry && typeof entry.email === 'string' && entry.email.trim())
-            .map(entry => ({
-                email: entry.email.trim(),
-                password: typeof entry.password === 'string' ? entry.password : '',
-                totpSecret: typeof entry.totpSecret === 'string' ? entry.totpSecret : undefined,
-                recoveryEmail: typeof entry.recoveryEmail === 'string' ? entry.recoveryEmail : '',
-                geoLocale: normalizeGeoLocale(typeof entry.geoLocale === 'string' ? entry.geoLocale : 'auto'),
-                langCode: normalizeLanguageCode(typeof entry.langCode === 'string' ? entry.langCode : 'en'),
-                proxy: { proxyHttp: false, url: '', port: 0, username: '', password: '' },
-                saveFingerprint: { mobile: false, desktop: false }
-            }))
+            .map(entry => ({ ...entry, email: entry.email.trim() }))
     } catch (error) {
         log('ERROR', `Failed to read extra accounts file: ${filePath} | ${error.message}`)
         return []
+    }
+}
+
+// 动态条目作为覆盖层: 仅覆盖显式提供的字段(如改密只给 password), 其余继承基础账号
+function applyExtraOverride(base, raw) {
+    if (typeof raw.password === 'string' && raw.password) base.password = raw.password
+    if (typeof raw.geoLocale === 'string' && raw.geoLocale) base.geoLocale = normalizeGeoLocale(raw.geoLocale)
+    if (typeof raw.langCode === 'string' && raw.langCode) base.langCode = normalizeLanguageCode(raw.langCode)
+    if (typeof raw.totpSecret === 'string' && raw.totpSecret) base.totpSecret = raw.totpSecret
+    if (typeof raw.recoveryEmail === 'string' && raw.recoveryEmail) base.recoveryEmail = raw.recoveryEmail
+    return base
+}
+
+function normalizeExtraStandalone(raw) {
+    return {
+        email: raw.email,
+        password: typeof raw.password === 'string' ? raw.password : '',
+        totpSecret: typeof raw.totpSecret === 'string' ? raw.totpSecret : undefined,
+        recoveryEmail: typeof raw.recoveryEmail === 'string' ? raw.recoveryEmail : '',
+        geoLocale: normalizeGeoLocale(typeof raw.geoLocale === 'string' ? raw.geoLocale : 'auto'),
+        langCode: normalizeLanguageCode(typeof raw.langCode === 'string' ? raw.langCode : 'en'),
+        proxy: { proxyHttp: false, url: '', port: 0, username: '', password: '' },
+        saveFingerprint: { mobile: false, desktop: false }
     }
 }
 

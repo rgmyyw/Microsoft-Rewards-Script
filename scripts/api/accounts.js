@@ -2,7 +2,7 @@ import { accountIndexesFromEnv, envStrFrom, normalizeGeoLocale, normalizeLanguag
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { loadExtraAccounts } from '../utils.js'
+import { readRawExtraAccounts } from '../utils.js'
 
 function sanitizeProxyUrl(value) {
     try {
@@ -34,6 +34,8 @@ function extraAccountEnvVars(entry, index) {
 
 export function loadAccounts(sourceEnv = process.env) {
     const accounts = []
+    const extras = readRawExtraAccounts(apiProjectRoot)
+    const matched = new Set()
 
     for (const i of accountIndexesFromEnv(sourceEnv)) {
         const email = envStrFrom(sourceEnv, `ACCOUNT_${i}_EMAIL`)
@@ -59,24 +61,37 @@ export function loadAccounts(sourceEnv = process.env) {
                   }
                 : null
         })
+
+        // 覆盖层: 动态条目与 env 账号同邮箱时, 覆盖其属性(如改密)
+        const override = extras.find(e => e.email.toLowerCase() === email.toLowerCase())
+        if (override) {
+            matched.add(override.email.toLowerCase())
+            const last = accounts[accounts.length - 1]
+            if (override.geoLocale) last.geoLocale = normalizeGeoLocale(override.geoLocale)
+            if (override.langCode) last.langCode = normalizeLanguageCode(override.langCode)
+            if (override.totpSecret) last.hasTotp = true
+        }
     }
 
     extraCache.clear()
-    loadExtraAccounts(apiProjectRoot).forEach((entry, i) => {
-        const index = EXTRA_BASE_INDEX + i
+    let seq = 0
+    for (const entry of extras) {
+        if (matched.has(entry.email.toLowerCase())) continue
+        const index = EXTRA_BASE_INDEX + seq
+        seq += 1
         extraCache.set(index, entry)
         accounts.push({
             index,
             email: entry.email,
             emailKey: entry.email,
-            geoLocale: entry.geoLocale,
-            langCode: entry.langCode,
+            geoLocale: normalizeGeoLocale(entry.geoLocale ?? 'auto'),
+            langCode: normalizeLanguageCode(entry.langCode ?? 'en'),
             hasRecoveryEmail: Boolean(entry.recoveryEmail),
             hasTotp: Boolean(entry.totpSecret),
             proxy: null,
             extra: true
         })
-    })
+    }
     return accounts
 }
 
@@ -89,8 +104,7 @@ export function buildSingleAccountEnv(accountIndex, sourceEnv = process.env) {
     }
 
     if (index >= EXTRA_BASE_INDEX) {
-        const extra = loadExtraAccounts(apiProjectRoot)
-        const entry = extra[index - EXTRA_BASE_INDEX]
+        const entry = readRawExtraAccounts(apiProjectRoot)[index - EXTRA_BASE_INDEX]
         if (!entry) {
             const err = new Error(`ACCOUNT_${index} is not configured.`)
             err.code = 'BAD_REQUEST'

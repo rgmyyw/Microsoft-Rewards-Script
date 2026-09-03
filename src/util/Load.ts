@@ -171,7 +171,24 @@ export function loadAccounts(): Account[] {
             })
         }
 
-        accounts.push(...loadExtraAccounts())
+        // Dashboard-managed extras act as an override layer: same email patches
+        // the env account (e.g. password rotation), otherwise it is appended.
+        const extras = loadExtraAccounts()
+        for (const account of accounts) {
+            const override = extras.find(e => e.email.toLowerCase() === account.email.toLowerCase())
+            if (override) {
+                if (override.password) account.password = override.password
+                if (override.geoLocale) account.geoLocale = override.geoLocale
+                if (override.langCode) account.langCode = override.langCode
+                if (override.totpSecret) account.totpSecret = override.totpSecret
+                if (override.recoveryEmail) account.recoveryEmail = override.recoveryEmail
+            }
+        }
+        for (const extra of extras) {
+            if (!accounts.some(a => a.email.toLowerCase() === extra.email.toLowerCase())) {
+                accounts.push(extra)
+            }
+        }
 
         if (!accounts.length) {
             throw new Error('No accounts found in environment. Set at least one ACCOUNT_N_EMAIL (see env.example).')

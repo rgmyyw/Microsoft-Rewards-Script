@@ -19,6 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const net = require('net');
+const tls = require('tls');
 
 // ============ 常量 ============
 const BASE_DIR = __dirname;
@@ -52,6 +53,14 @@ function defaultPushConfig() {
       error:        { enabled: true,  label: '❌ 错误' },
       loginFail:    { enabled: true,  label: '⚠️ 登录/风控异常' },
       dailySummary: { enabled: false, label: '📊 运行摘要' },
+    },
+    email: {
+      enabled: false,
+      smtpHost: 'smtp.qq.com',
+      smtpPort: 465,
+      user: '',
+      pass: '',
+      to: '',
     },
     dedupSeconds: 10,
     updatedAt: null,
@@ -239,10 +248,18 @@ function pushForEntry(entry) {
   }
 
   if (key && lines && shouldSend(key)) {
-    const kw = pushConfig.dingtalk.keyword || 'MS-Rewards';
-    sendDingTalk(`[${kw}] ${lines.join('\n')}`).then((r) => {
-      log('INFO', `${r.ok ? '✓' : '✗'} 推送 ${key} -> ${r.resp ? r.resp.slice(0, 100) : 'ok'}`);
-    });
+    const text = lines.join('\n');
+    if (pushConfig.dingtalk.enabled && pushConfig.dingtalk.accessToken) {
+      const kw = pushConfig.dingtalk.keyword || 'MS-Rewards';
+      sendDingTalk(`[${kw}] ${text}`).then((r) => {
+        log('INFO', `${r.ok ? '✓' : '✗'} 钉钉推送 ${key} -> ${r.resp ? r.resp.slice(0, 100) : 'ok'}`);
+      });
+    }
+    if (emailReady()) {
+      sendEventEmail(lines).then((r) => {
+        log('INFO', `${r.ok ? '✓' : '✗'} 邮件推送 ${key} -> ${r.ok ? pushConfig.email.to : (r.error || '失败')}`);
+      });
+    }
   }
 }
 
@@ -339,6 +356,7 @@ function handleFrame(frame) {
   if (event === 'log') {
     pushForEntry(data);
     recordEntry(data);
+    pushAccountLog(data);
   } else if (event === 'hello') {
     log('INFO', 'SSE 连接成功(hello 快照收到)');
   } else if (event === 'status') {
@@ -677,6 +695,133 @@ function writeExtraFile(list) {
   }
 }
 
+// ============ 邮件通知(零依赖 SMTP 客户端, SSL 465 / STARTTLS 587) ============
+function sendEmail(cfg, subject, body) {
+  return new Promise((resolve) => {
+    const port = Number(cfg.smtpPort) || 465
+    const implicitTls = cfg.secure !== false && port === 465
+    const auth = Buffer.from('\u0000' + cfg.user + '\u0000' + cfg.pass).toString('base64')
+    const toList = String(cfg.to || '').split(/[,;，；]/).map(a => a.trim()).filter(a => a.includes('@'))
+    if (!toList.length) return resolve({ ok: false, error: '收件邮箱未配置' })
+
+    let settled = false
+    let socket = null
+    let buffer = ''
+    let step = 0 // 0=等问候 1=EHLO后 2=AUTH 3=MAIL 4=RCPT 5=DATA 6=已发送正文 10=STARTTLS协商中
+    let tlsDone = implicitTls
+    let rcptIdx = 0
+    const done = (r) => { if (!settled) { settled = true; resolve(r) } }
+    const fail = (msg) => { try { if (socket) socket.destroy() } catch (e) { /* ignore */ } done({ ok: false, error: msg }) }
+    const sendCmd = (line) => socket.write(line + '\r\n')
+
+    const handleReply = (line) => {
+      const code = parseInt(line, 10)
+      if (Number.isNaN(code) || code >= 400) return fail('SMTP ' + line.slice(0, 140))
+      switch (step) {
+        case 0: step = 1; sendCmd('EHLO dashboard'); break
+        case 1:
+          if (!tlsDone) { step = 10; sendCmd('STARTTLS'); break }
+          step = 2; sendCmd('AUTH PLAIN ' + auth); break
+        case 2: step = 3; sendCmd('MAIL FROM:<' + cfg.user + '>'); break
+        case 3: step = 4; sendCmd('RCPT TO:<' + toList[0] + '>'); rcptIdx = 1; break
+        case 4:
+          if (rcptIdx < toList.length) { sendCmd('RCPT TO:<' + toList[rcptIdx] + '>'); rcptIdx += 1; break }
+          step = 5; sendCmd('DATA'); break
+        case 5: {
+          step = 6
+          const b64 = Buffer.from(body, 'utf8').toString('base64').replace(/(.{76})/g, '$1\r\n')
+          sendCmd([
+            'From: MS-Rewards <' + cfg.user + '>',
+            'To: ' + toList.join(', '),
+            'Subject: =?UTF-8?B?' + Buffer.from(subject, 'utf8').toString('base64') + '?=',
+            'MIME-Version: 1.0',
+            'Content-Type: text/plain; charset=UTF-8',
+            'Content-Transfer-Encoding: base64',
+            '',
+            b64,
+            '.',
+          ].join('\r\n'))
+          break
+        }
+        case 6:
+          sendCmd('QUIT')
+          done({ ok: true })
+          try { socket.end() } catch (e) { /* ignore */ }
+          break
+      }
+    }
+    const onData = (chunk) => {
+      buffer += chunk.toString('utf8')
+      let idx
+      while ((idx = buffer.indexOf('\r\n')) >= 0) {
+        const line = buffer.slice(0, idx)
+        buffer = buffer.slice(idx + 2)
+        if (/^\d{3}-/.test(line)) continue // 多行响应的中间行
+        if (step === 10) {
+          if (parseInt(line, 10) !== 220) return fail('STARTTLS 失败: ' + line.slice(0, 140))
+          const tlsSocket = tls.connect({ socket, servername: cfg.smtpHost, rejectUnauthorized: false }, () => {
+            tlsDone = true
+            step = 1
+            buffer = ''
+            sendCmd('EHLO dashboard')
+          })
+          socket = tlsSocket
+          attach(tlsSocket)
+          return
+        }
+        handleReply(line)
+        return
+      }
+    }
+    const attach = (s2) => {
+      s2.setTimeout(15000, () => fail('SMTP 超时'))
+      s2.on('data', onData)
+      s2.on('error', (e) => fail('SMTP 连接失败: ' + e.message))
+    }
+
+    if (implicitTls) {
+      socket = tls.connect({ host: cfg.smtpHost, port, servername: cfg.smtpHost, rejectUnauthorized: false }, () => {
+        // TLS 就绪, 等服务器 220 问候后由状态机发 EHLO
+      })
+      attach(socket)
+    } else {
+      socket = net.connect({ host: cfg.smtpHost, port }, () => {})
+      attach(socket)
+    }
+  })
+}
+
+function emailReady() {
+  const em = pushConfig.email || {}
+  return Boolean(em.enabled && em.smtpHost && em.user && em.pass && em.to)
+}
+
+function sendEventEmail(lines) {
+  const em = pushConfig.email || {}
+  return sendEmail(em, '[MS-Rewards] ' + String(lines[0] || '通知'), lines.join('\n'))
+}
+
+// ============ 每账号运行日志缓存(SSE 流按账号标签环形缓存) ============
+const ACCOUNT_LOG_KEEP = 300
+const accountLogs = new Map() // user 标签 -> [{ts, level, platform, title, message}]
+function pushAccountLog(entry) {
+  const tag = String(entry.user || '').trim()
+  if (!tag) return
+  let arr = accountLogs.get(tag)
+  if (!arr) { arr = []; accountLogs.set(tag, arr) }
+  arr.push({
+    ts: entry.ts || entry.receivedAt || Date.now(),
+    level: (entry.level || 'info').toUpperCase(),
+    platform: entry.platform || 'MAIN',
+    title: entry.title || '',
+    message: String(entry.message || '').slice(0, 400),
+  })
+  if (arr.length > ACCOUNT_LOG_KEEP) arr.splice(0, arr.length - ACCOUNT_LOG_KEEP)
+}
+
+// ============ 能力控制(经容器 API PATCH /config 与 PUT /schedule) ============
+const WORKER_KEYS = ['doDailySet', 'doSpecialPromotions', 'doMorePromotions', 'doPunchCards', 'doAppPromotions', 'doDesktopSearch', 'doMobileSearch', 'doDailyCheckIn', 'doReadToEarn', 'doClaimBonusPoints', 'doActivateSearchPerk', 'doBonusSearches', 'doVisualSearch']
+
 // ============ HTTP 服务(8300) ============
 function json(res, code, obj) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -731,6 +876,7 @@ const server = http.createServer(async (req, res) => {
       const merged = Object.assign(defaultPushConfig(), pushConfig, {
         dingtalk: Object.assign({}, pushConfig.dingtalk, body.dingtalk),
         events: Object.assign({}, pushConfig.events, body.events),
+        email: Object.assign({}, pushConfig.email, body.email),
         dedupSeconds: body.dedupSeconds != null ? body.dedupSeconds : pushConfig.dedupSeconds,
       });
       pushConfig = merged;
@@ -738,8 +884,23 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, config: pushConfig });
     }
     if (p === '/api/push-test' && req.method === 'POST') {
-      const r = await sendDingTalk(`[${pushConfig.dingtalk.keyword || 'MS-Rewards'}] 🧪 测试推送\n仪表盘推送配置测试成功 ✅\n(${new Date().toLocaleString('zh-CN')})`);
-      return json(res, 200, r);
+      const stamp = new Date().toLocaleString('zh-CN')
+      const tasks = []
+      if (pushConfig.dingtalk.enabled && pushConfig.dingtalk.accessToken) {
+        tasks.push(
+          sendDingTalk(`[${pushConfig.dingtalk.keyword || 'MS-Rewards'}] 🧪 测试推送\n仪表盘推送配置测试成功 ✅\n(${stamp})`)
+            .then((r) => ({ channel: '钉钉', ok: r.ok, error: r.error || (r.resp ? r.resp.slice(0, 120) : '') }))
+        )
+      }
+      if (emailReady()) {
+        tasks.push(
+          sendEmail(pushConfig.email, '[MS-Rewards] 🧪 测试推送', '仪表盘推送配置测试成功 ✅\n(' + stamp + ')')
+            .then((r) => ({ channel: '邮件', ok: r.ok, error: r.error || '' }))
+        )
+      }
+      if (!tasks.length) return json(res, 200, { ok: false, error: '钉钉与邮件均未启用/未配置' })
+      const results = await Promise.all(tasks)
+      return json(res, 200, { ok: results.some((r) => r.ok), results })
     }
     if (p === '/api/start' && req.method === 'POST') {
       // body: {} = 全部账号 | { accountIndex: N } = 单账号 | { indexes: [..] } = 选中账号(转换为排除未选)
@@ -917,6 +1078,70 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, count: next.length });
     }
 
+    if (p === '/api/account-logs' && req.method === 'GET') {
+      const user = url.searchParams.get('user') || '';
+      const arr = accountLogs.get(user) || [];
+      const lines = arr.slice(-200).map((e) => '[' + new Date(e.ts).toLocaleString('zh-CN') + '] [' + e.level + '] ' + e.platform + ' [' + e.title + '] ' + e.message);
+      return json(res, 200, { user, lines, count: lines.length });
+    }
+    if (p === '/api/capabilities' && req.method === 'GET') {
+      const cfg = await fetchJson('/config');
+      const sch = await fetchJson('/schedule');
+      const c = (cfg && cfg.config) || {};
+      const ss = c.searchSettings || {};
+      return json(res, 200, {
+        capabilities: {
+          clusters: c.clusters ?? 1,
+          queryEngines: ss.queryEngines || ['china', 'local'],
+          appkeyConfigured: Boolean(ss.chinaApi && ss.chinaApi.appkey),
+          searchDelay: { min: (ss.searchDelay || {}).min || '5min', max: (ss.searchDelay || {}).max || '9min' },
+          workers: c.workers || {},
+        },
+        schedule: sch ? { enabled: Boolean(sch.enabled), cron: sch.cron || '' } : null,
+      });
+    }
+    if (p === '/api/capabilities' && req.method === 'PUT') {
+      let body = {};
+      try { body = await readBody(req); } catch (e) { body = {}; }
+      const patch = {};
+      if (body.clusters != null) {
+        const n = Number(body.clusters);
+        if (!Number.isSafeInteger(n) || n < 1 || n > 3) return json(res, 400, { error: 'clusters 仅支持 1-3' });
+        patch.clusters = n;
+      }
+      const ss = {};
+      if (Array.isArray(body.queryEngines) && body.queryEngines.length) ss.queryEngines = body.queryEngines;
+      if (body.appkey != null && String(body.appkey).trim() !== '') {
+        ss.chinaApi = { appkey: String(body.appkey).trim() };
+      }
+      if (body.delayMin || body.delayMax) {
+        ss.searchDelay = { min: String(body.delayMin), max: String(body.delayMax) };
+      }
+      if (Object.keys(ss).length) patch.searchSettings = ss;
+      if (body.workers && typeof body.workers === 'object') patch.workers = body.workers;
+      if (!Object.keys(patch).length) return json(res, 400, { error: '没有需要保存的变更' });
+      return proxyContainerApi('/config', 'PATCH', patch, res);
+    }
+    if (p === '/api/capabilities/schedule' && req.method === 'PUT') {
+      let body = {};
+      try { body = await readBody(req); } catch (e) { body = {}; }
+      return proxyContainerApi('/schedule', 'PUT', { enabled: Boolean(body.enabled), cron: String(body.cron || '') }, res);
+    }
+    if (p === '/api/accounts-manage/password' && req.method === 'POST') {
+      let body = {};
+      try { body = await readBody(req); } catch (e) { body = {}; }
+      const email = String(body.email || '').trim().toLowerCase();
+      const password = String(body.password || '');
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json(res, 400, { error: '邮箱格式不正确' });
+      if (!password) return json(res, 400, { error: '新密码不能为空' });
+      const list = readExtraFile();
+      const entry = list.find((e) => String(e.email || '').toLowerCase() === email);
+      if (entry) entry.password = password;
+      else list.push({ email, password });
+      if (!writeExtraFile(list)) return json(res, 500, { error: '写入失败' });
+      return json(res, 200, { ok: true, note: '密码已更新，下一次运行自动生效（覆盖层机制，固定账号亦适用）' });
+    }
+
     // ---- 前端页面 ----
     if (p === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -1049,6 +1274,7 @@ const HTML = `<!DOCTYPE html>
       <div class="menu">
         <button class="btn secondary" onclick="toggleMenu(event)">⚙ 菜单</button>
         <div class="menu-drop" id="menuDrop">
+          <button class="menu-item" onclick="openCap(); closeMenu()">🎛 能力控制（并行/词源/调度）</button>
           <button class="menu-item" onclick="openAccounts(); closeMenu()">👥 账号管理（动态添加）</button>
           <button class="menu-item" onclick="openPush(); closeMenu()">🔔 通知设置（钉钉推送）</button>
           <button class="menu-item" onclick="manualRefresh(); closeMenu()">⟳ 立即刷新</button>
@@ -1129,6 +1355,18 @@ const HTML = `<!DOCTYPE html>
         <div class="switch-row"><span>📊 运行摘要（每日）</span><label class="switch"><input type="checkbox" id="ev-dailySummary"><span class="slider"></span></label></div>
       </div>
     </div>
+    <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
+      <div class="field"><label>📧 邮件通知（与钉钉并存，事件同时发邮件）</label>
+        <div class="switch-row" style="border:0;padding:4px 0"><span>启用邮件通知</span><label class="switch"><input type="checkbox" id="emEnabled"><span class="slider"></span></label></div>
+      </div>
+      <div class="grid-2">
+        <div class="field"><label>SMTP 服务器（如 smtp.qq.com）</label><input type="text" id="emHost" placeholder="smtp.qq.com"></div>
+        <div class="field"><label>端口（465=SSL，587=STARTTLS）</label><input type="text" id="emPort" placeholder="465"></div>
+        <div class="field"><label>发件邮箱（登录账号）</label><input type="text" id="emUser" placeholder="you@qq.com"></div>
+        <div class="field"><label>SMTP 授权码（不是登录密码）</label><div class="pw-row"><input type="password" id="emPass" placeholder="授权码"><button type="button" class="eye" onclick="togglePass('emPass',this)">👁</button></div></div>
+        <div class="field"><label>收件邮箱（多个用逗号分隔）</label><input type="text" id="emTo" placeholder="target@example.com"></div>
+      </div>
+    </div>
     <div class="hint">钉钉安全设置：自定义关键词需与机器人配置一致，或使用加签模式（填 SECRET）。修改后点「保存」即时生效，无需重启服务。</div>
     <div class="toolbar" style="margin-top:14px">
       <button class="btn" onclick="savePush()">💾 保存</button>
@@ -1177,11 +1415,83 @@ const HTML = `<!DOCTYPE html>
     </div>
   </dialog>
 
+  <dialog id="capModal">
+    <h2>🎛 能力控制</h2>
+    <div class="hint">设置写入容器 config.json，<b>下一次运行自动生效</b>，无需重启容器。</div>
+    <div class="grid-2">
+      <div>
+        <div class="field"><label>并行集群数（一次运行同时处理的账号数，内存随集群数增加）</label>
+          <select id="capClusters" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:14px;margin-top:4px">
+            <option value="1">1（串行，最省内存）</option><option value="2">2（推荐）</option><option value="3">3（内存紧张）</option>
+          </select>
+        </div>
+        <div class="field"><label>搜索词源</label>
+          <select id="capEngines" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:14px;margin-top:4px">
+            <option value="china,local">中国热搜 + 本地兜底（推荐）</option>
+            <option value="china">仅中国热搜</option>
+            <option value="google,local">Google Trends + 本地</option>
+            <option value="local">仅本地词库</option>
+          </select>
+        </div>
+        <div class="field"><label>gmya appkey（解除免费档限流；留空=不修改）</label><input type="text" id="capAppkey" placeholder="已配置则显示占位符"></div>
+        <div class="field"><label>搜索间隔（反风控核心参数，越快风险越高）</label>
+          <select id="capDelay" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:14px;margin-top:4px">
+            <option value="6,12">稳妥 6-12 分钟</option>
+            <option value="5,9">标准 5-9 分钟（当前）</option>
+            <option value="4,8">较快 4-8 分钟</option>
+            <option value="3,6">激进 3-6 分钟（风险自担）</option>
+          </select>
+        </div>
+      </div>
+      <div>
+        <div class="field"><label>每日调度时间</label>
+          <div class="pw-row">
+            每天 <select id="capCronHour" style="padding:6px 8px;border:1px solid var(--border);border-radius:8px;font-size:13px"></select> 点
+            <select id="capCronMin" style="padding:6px 8px;border:1px solid var(--border);border-radius:8px;font-size:13px"><option value="0">00</option><option value="15">15</option><option value="30" selected>30</option><option value="45">45</option></select> 分
+          </div>
+        </div>
+        <div class="switch-row"><span>启用每日定时</span><label class="switch"><input type="checkbox" id="capCronOn" checked><span class="slider"></span></label></div>
+        <div class="hint">调度写入 config/schedule.json 并即时重装容器内 crontab（优先于 CRON_SCHEDULE 环境变量）。</div>
+      </div>
+    </div>
+    <div class="field"><label>任务开关（关闭的板块在后续运行中跳过）</label>
+      <div class="grid-2" style="font-size:13px">
+        <div class="switch-row"><span>每日任务集</span><label class="switch"><input type="checkbox" id="w-doDailySet" checked><span class="slider"></span></label></div>
+        <div class="switch-row"><span>桌面搜索</span><label class="switch"><input type="checkbox" id="w-doDesktopSearch" checked><span class="slider"></span></label></div>
+        <div class="switch-row"><span>移动搜索</span><label class="switch"><input type="checkbox" id="w-doMobileSearch" checked><span class="slider"></span></label></div>
+        <div class="switch-row"><span>每日签到</span><label class="switch"><input type="checkbox" id="w-doDailyCheckIn" checked><span class="slider"></span></label></div>
+        <div class="switch-row"><span>读赚</span><label class="switch"><input type="checkbox" id="w-doReadToEarn" checked><span class="slider"></span></label></div>
+        <div class="switch-row"><span>特殊活动</span><label class="switch"><input type="checkbox" id="w-doSpecialPromotions" checked><span class="slider"></span></label></div>
+        <div class="switch-row"><span>更多活动</span><label class="switch"><input type="checkbox" id="w-doMorePromotions" checked><span class="slider"></span></label></div>
+        <div class="switch-row"><span>打卡任务</span><label class="switch"><input type="checkbox" id="w-doPunchCards" checked><span class="slider"></span></label></div>
+        <div class="switch-row"><span>App 任务</span><label class="switch"><input type="checkbox" id="w-doAppPromotions" checked><span class="slider"></span></label></div>
+        <div class="switch-row"><span>领取奖励积分</span><label class="switch"><input type="checkbox" id="w-doClaimBonusPoints" checked><span class="slider"></span></label></div>
+        <div class="switch-row"><span>搜索加成激活</span><label class="switch"><input type="checkbox" id="w-doActivateSearchPerk" checked><span class="slider"></span></label></div>
+        <div class="switch-row"><span>额外搜索</span><label class="switch"><input type="checkbox" id="w-doBonusSearches"><span class="slider"></span></label></div>
+        <div class="switch-row"><span>视觉搜索</span><label class="switch"><input type="checkbox" id="w-doVisualSearch"><span class="slider"></span></label></div>
+      </div>
+    </div>
+    <div class="toolbar" style="margin-top:14px">
+      <button class="btn" onclick="saveCap()">💾 保存</button>
+      <button class="btn secondary" onclick="closeCap()">关闭</button>
+      <span id="capMsg" class="sub"></span>
+    </div>
+  </dialog>
+
+  <dialog id="logsModal">
+    <h2>📜 运行日志 <span id="logsEmail" style="color:var(--ms-blue)"></span></h2>
+    <pre id="logsBox" style="background:#101418;color:#cde3d8;font-size:12px;line-height:1.5;padding:12px;border-radius:8px;max-height:60vh;overflow:auto;white-space:pre-wrap;word-break:break-all">加载中…</pre>
+    <div class="toolbar" style="margin-top:10px">
+      <button class="btn secondary" onclick="closeLogs()">关闭</button>
+      <span class="sub">每 3 秒自动刷新，保留最近 300 条（容器重建后清零）</span>
+    </div>
+  </dialog>
+
   <div class="foot">数据来源: microsoft-rewards-script 容器 API · <span id="footRefresh">每 15 秒自动刷新</span> · ms-rewards-dashboard</div>
 </div>
 <script>
 'use strict';
-var API = { overview:'/api/overview', pushConfig:'/api/push-config', pushTest:'/api/push-test', start:'/api/start', stop:'/api/stop', loginCheck:'/api/login-check', loginCheckStatus:'/api/login-check/status', manualLogin:'/api/manual-login', manualLoginStatus:'/api/manual-login/status', manualLoginStop:'/api/manual-login/stop', accountsManage:'/api/accounts-manage' };
+var API = { overview:'/api/overview', pushConfig:'/api/push-config', pushTest:'/api/push-test', start:'/api/start', stop:'/api/stop', loginCheck:'/api/login-check', loginCheckStatus:'/api/login-check/status', manualLogin:'/api/manual-login', manualLoginStatus:'/api/manual-login/status', manualLoginStop:'/api/manual-login/stop', accountsManage:'/api/accounts-manage', accountsPass:'/api/accounts-manage/password', capabilities:'/api/capabilities', schedule:'/api/capabilities/schedule', accountLogs:'/api/account-logs' };
 var selected = {};
 var selectionReady = false; // 首次拿到账号列表时默认全选, 之后尊重用户的选择
 var accountsCache = [];
@@ -1324,6 +1634,7 @@ function renderAccounts(now) {
       + '<td style="font-size:12px">' + act + '</td>'
       + '<td>' + err + '</td>'
       + '<td class="rowact">'
+      + '<button class="btn small secondary" title="查看该账号实时运行日志" onclick="openLogs(' + a.index + ')">📜</button> '
       + '<button class="btn small secondary" title="登录体检: 无头检查会话并刷新实时余额(约 30-60 秒)" onclick="doCheck(' + a.index + ')">🩺</button> '
       + '<button class="btn small secondary" title="人工登录: 在容器内浏览器完成微软验证, 自动保存会话" onclick="doManualLogin(' + a.index + ')">🔑</button>'
       + checkNote(a)
@@ -1437,6 +1748,13 @@ function loadPushForm(c) {
   $('ev-error').checked = !(ev.error && ev.error.enabled === false);
   $('ev-loginFail').checked = !(ev.loginFail && ev.loginFail.enabled === false);
   $('ev-dailySummary').checked = !!(ev.dailySummary && ev.dailySummary.enabled === true);
+  var em = c.email || {};
+  $('emEnabled').checked = !!em.enabled;
+  $('emHost').value = em.smtpHost || 'smtp.qq.com';
+  $('emPort').value = em.smtpPort || 465;
+  $('emUser').value = em.user || '';
+  $('emPass').value = em.pass || '';
+  $('emTo').value = em.to || '';
   showPushMsg('', true);
 }
 function showPushMsg(txt, ok) { var el = $('pushMsg'); el.textContent = txt; el.style.color = ok ? 'var(--ok)' : 'var(--err)'; }
@@ -1455,6 +1773,14 @@ function collectPush() {
       error: { enabled: $('ev-error').checked },
       loginFail: { enabled: $('ev-loginFail').checked },
       dailySummary: { enabled: $('ev-dailySummary').checked },
+    },
+    email: {
+      enabled: $('emEnabled').checked,
+      smtpHost: $('emHost').value.trim() || 'smtp.qq.com',
+      smtpPort: parseInt($('emPort').value, 10) || 465,
+      user: $('emUser').value.trim(),
+      pass: $('emPass').value,
+      to: $('emTo').value.trim(),
     },
     dedupSeconds: parseInt($('ddDedup').value, 10) || 10,
   };
@@ -1574,11 +1900,13 @@ function closeAccounts() {
 }
 function showAcctMsg(txt, ok) { var el = $('acctMsg'); el.textContent = txt; el.style.color = ok ? 'var(--ok)' : 'var(--err)'; }
 var acctManageList = [];
+var acctManageRows = [];
 function renderAcctManage(d) {
   var box = $('acctRows');
   var fileAccounts = d.accounts || [];
   acctManageList = fileAccounts.slice();
   var all = accountsCache.slice();
+  acctManageRows = all;
   for (var i = 0; i < fileAccounts.length; i++) {
     var fa = fileAccounts[i];
     var exists = false;
@@ -1590,7 +1918,8 @@ function renderAcctManage(d) {
   for (var k = 0; k < all.length; k++) {
     var a = all[k];
     var src = a.extra ? '<span class="badge run">动态</span>' : '<span class="badge">固定</span>';
-    var del = a.extra ? '<button class="btn small danger" onclick="delAccount(' + a.index + ')">删除</button>' : '';
+    var del = '<button class="btn small secondary" title="修改微软账号密码，下一次运行生效" onclick="changePass(' + k + ')">🔑 改密</button> '
+      + (a.extra ? '<button class="btn small danger" onclick="delAccount(' + a.index + ')">删除</button>' : '');
     var totp = a.hasTotp ? '是' : '-';
     var geo = a.geoLocale || '-';
     html += '<tr><td>' + esc(a.email) + (a.fresh ? ' <span class="badge err">未运行过</span>' : '') + '</td><td>' + src + '</td><td>' + esc(geo) + '</td><td>' + totp + '</td><td>' + del + '</td></tr>';
@@ -1623,6 +1952,112 @@ function delAccount(index) {
       openAccounts();
     })
     .catch(function (e) { showAcctMsg('删除失败: ' + e.message, false); });
+}
+
+// ---- 能力控制 ----
+var WORKER_KEYS = ['doDailySet','doDesktopSearch','doMobileSearch','doDailyCheckIn','doReadToEarn','doSpecialPromotions','doMorePromotions','doPunchCards','doAppPromotions','doClaimBonusPoints','doActivateSearchPerk','doBonusSearches','doVisualSearch'];
+function openCap() {
+  apiFetch(API.capabilities, null, 8000).then(renderCap).catch(function (e) { showCapMsg('读取失败: ' + e.message, false); });
+  var dlg = $('capModal');
+  if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
+}
+function closeCap() {
+  var dlg = $('capModal');
+  if (dlg.close) dlg.close(); else dlg.removeAttribute('open');
+}
+function showCapMsg(txt, ok) { var el = $('capMsg'); el.textContent = txt; el.style.color = ok ? 'var(--ok)' : 'var(--err)'; }
+function renderCap(d) {
+  var c = (d && d.capabilities) || {};
+  var w = c.workers || {};
+  $('capClusters').value = String(c.clusters || 1);
+  $('capEngines').value = (c.queryEngines || []).join(',');
+  $('capAppkey').placeholder = c.appkeyConfigured ? '已配置(隐藏)' : '未配置，免费档限流';
+  var dl = c.searchDelay || {};
+  var cur = (dl.min || '') + ',' + (dl.max || '');
+  var sel = $('capDelay');
+  var found = false;
+  for (var i = 0; i < sel.options.length; i++) if (sel.options[i].value === cur) { found = true; sel.selectedIndex = i; break; }
+  if (!found && cur !== ',') {
+    var o = document.createElement('option');
+    o.value = cur; o.textContent = '自定义 ' + cur;
+    sel.appendChild(o); sel.value = cur;
+  }
+  WORKER_KEYS.forEach(function (key) { var el = $('w-' + key); if (el) el.checked = w[key] !== false; });
+  var sch = d.schedule || {};
+  $('capCronOn').checked = sch.enabled !== false;
+  var parts = String(sch.cron || '30 8 * * *').split(' ');
+  $('capCronMin').value = parts[0] || '30';
+  $('capCronHour').value = parts[1] || '8';
+  showCapMsg('', true);
+}
+function saveCap() {
+  var workers = {};
+  WORKER_KEYS.forEach(function (key) { workers[key] = $('w-' + key).checked; });
+  var delay = $('capDelay').value.split(',');
+  var patch = {
+    clusters: parseInt($('capClusters').value, 10) || 1,
+    queryEngines: $('capEngines').value.split(',').map(function (x) { return x.trim(); }).filter(Boolean),
+    delayMin: delay[0], delayMax: delay[1],
+    workers: workers,
+  };
+  var appkey = $('capAppkey').value.trim();
+  if (appkey) patch.appkey = appkey;
+  fetch(API.capabilities, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (d && d.error) { showCapMsg('保存失败: ' + d.error, false); return; }
+      var cron = $('capCronMin').value + ' ' + $('capCronHour').value + ' * * *';
+      return fetch(API.schedule, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: $('capCronOn').checked, cron: cron }) })
+        .then(function (r) { return r.json(); })
+        .then(function (d2) {
+          if (d2 && d2.error) showCapMsg('能力已保存，调度失败: ' + d2.error, false);
+          else showCapMsg('✅ 已保存，下一次运行生效', true);
+        });
+    })
+    .catch(function (e) { showCapMsg('保存失败: ' + e.message, false); });
+}
+
+// ---- 每账号运行日志 ----
+var logsTimer = null;
+var logsTag = '';
+function openLogs(index) {
+  var a = null;
+  for (var i = 0; i < accountsCache.length; i++) if (accountsCache[i].index === index) a = accountsCache[i];
+  if (!a) return;
+  logsTag = String(a.email).split('@')[0];
+  $('logsEmail').textContent = a.email;
+  var dlg = $('logsModal');
+  if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
+  pullLogs();
+  if (!logsTimer) logsTimer = setInterval(pullLogs, 3000);
+}
+function pullLogs() {
+  fetch(API.accountLogs + '?user=' + encodeURIComponent(logsTag))
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      $('logsBox').textContent = (d.lines && d.lines.length) ? d.lines.join('\n') : '暂无日志（该账号尚未在本容器生命周期内产生事件，或容器刚重建）';
+    })
+    .catch(function () {});
+}
+function closeLogs() {
+  var dlg = $('logsModal');
+  if (dlg.close) dlg.close(); else dlg.removeAttribute('open');
+}
+
+// ---- 账号改密(覆盖层) ----
+function changePass(k) {
+  var a = acctManageRows[k];
+  if (!a) return;
+  var np = prompt('为 ' + a.email + ' 设置新的微软账号密码：');
+  if (np == null) return;
+  if (!np) { alert('密码不能为空'); return; }
+  fetch(API.accountsPass, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: a.email, password: np }) })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (d && d.ok) alert('✅ 密码已更新，下一次运行自动生效');
+      else alert((d && d.error) || '失败');
+    })
+    .catch(function (e) { alert('失败: ' + e.message); });
 }
 
 function showDiag() {
@@ -1659,6 +2094,17 @@ document.addEventListener('click', function (e) {
     fetch(API.manualLoginStop, { method: 'POST' }).catch(function () {});
     scheduleRefresh();
   });
+})();
+(function () {
+  var h = $('capCronHour');
+  if (h) for (var i = 0; i < 24; i++) {
+    var o = document.createElement('option');
+    o.value = String(i);
+    o.textContent = (i < 10 ? '0' : '') + i;
+    h.appendChild(o);
+  }
+  var lg = $('logsModal');
+  if (lg) lg.addEventListener('close', function () { if (logsTimer) { clearInterval(logsTimer); logsTimer = null; } });
 })();
 updateIvUi();
 scheduleRefresh();
