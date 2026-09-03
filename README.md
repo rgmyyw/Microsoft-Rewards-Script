@@ -1,28 +1,19 @@
 <div align="center">
 
-# 微软奖励脚本（V4-china）
+# 微软奖励脚本（V4 · 内嵌看板）
 
-[![Version](https://img.shields.io/badge/version-4.3.0-blue.svg)](./package.json)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D24-green.svg)](./package.json)
-[![Last Sync](https://img.shields.io/badge/最后同步-2026--08--16-orange.svg)](#-同步与致谢)
 [![Upstream](https://img.shields.io/badge/上游-TheNetsky/Microsoft--Rewards--Script-informational.svg)](https://github.com/TheNetsky/Microsoft-Rewards-Script)
 
 **基于 TypeScript · Patchright(Playwright) 的新一代架构 · 微软奖励自动化脚本**
 
-针对国内用户深度本地化：✅ 中国热搜查询源（百度/头条/抖音/微博/知乎） · ✅ 日志中文化 · ✅ PushPlus / 微信 ClawBot 推送 · ✅ Docker 镜像加速
+针对国内环境深度本地化：✅ 中国热搜查询源（百度/头条/抖音/微博/知乎） · ✅ 日志中文化 · ✅ PushPlus / 微信 ClawBot 推送 · ✅ 内嵌积分看板（批量运行 / 动态账号 / 登录体检 / 人工登录 / 钉钉推送）
 
 </div>
 
-> ℹ️ **分支选择建议**
->
-> - **`main` 分支（v3，稳定版）**：已兼容微软新版 UI，实测未发现明显异常，可放心日常使用。
-> - **`V4-china` 分支（v4 新架构，基本可用，本分支）**：搜索、活动、签到、Read-to-Earn、微信推送（PushPlus / ClawBot）等核心功能已实测通过（2026-08），**可以切换日常使用**；新架构仍在迭代，偶发小问题属正常，追求稳定可继续留在 `main` 分支。
->
-> 两分支配置文件结构不同，**互不兼容**；本分支账号改用 `.env` 环境变量配置（不再使用 `accounts.json`），从 v3 迁移请按本文档重新配置 `.env` / `config.json`。
-
 > [!TIP]
-> 本分支仅支持**新版（modern）Bing Rewards 面板**，不支持旧版面板。账户还在旧版面板的请使用本仓库 [`main` 分支](https://github.com/chiihero/Microsoft-Rewards-Script/tree/main)（v3）。
+> 本项目仅支持**新版（modern）Bing Rewards 面板**，不支持旧版面板。
 
 ---
 
@@ -39,7 +30,7 @@
 - [🔔 通知渠道](#-通知渠道)
 - [❓ 常见问题](#-常见问题)
 - [⚠️ 注意事项](#-注意事项)
-- [📜 同步与致谢](#-同步与致谢)
+- [📜 来源与说明](#-来源与说明)
 - [⚠️ 免责声明](#-免责声明)
 
 ---
@@ -100,7 +91,7 @@
 | **升级方式**   | `git pull` + `npm run build`          | `docker compose up -d --build`                       |
 | **前置要求**   | Node.js 24+                           | Docker + Docker Compose                              |
 
-> ⚠️ 与 v3（`main` 分支）不同：**账号统一在 `.env` 中配置**（`ACCOUNT_1_EMAIL` 等），不再使用 `accounts.json`；行为配置仍在 `config.json`（Docker 下用 `CONFIG_*` 环境变量）。
+> ⚠️ 与 v3 不同：**账号统一在 `.env` 中配置**（`ACCOUNT_1_EMAIL` 等），不再使用 `accounts.json`；行为配置仍在 `config.json`（Docker 下用 `CONFIG_*` 环境变量）。
 
 ---
 
@@ -114,7 +105,7 @@
 1. 下载或克隆源代码：
 
     ```bash
-    git clone -b V4-china https://github.com/chiihero/Microsoft-Rewards-Script.git
+    git clone -b v4-dashboard https://github.com/rgmyyw/Microsoft-Rewards-Script.git
     ```
 
     > 国内无法直连 GitHub 时可用镜像加速：在 URL 前加 `https://gh-proxy.com/`，或在本仓库页面 "Code → Download ZIP" 下载。
@@ -437,7 +428,7 @@ docker compose restart          # 重启（不重建）
 > 运行结束的中文积分摘要会一次性推送（不逐条推日志）。
 
 <details>
-<summary><b>🤖 微信 ClawBot 推送（V4-china 特有）</b></summary>
+<summary><b>🤖 微信 ClawBot 推送</b></summary>
 
 基于腾讯官方微信 ClawBot（iLink 灰度接口）直连推送，**免费、无第三方服务、消息直达微信聊天列表**。需要你的微信号有 ClawBot 灰度资格（微信 → 我 → 设置 → 插件）。
 
@@ -544,26 +535,20 @@ gmya.net 免费档对连续请求有频率限制。解决方法：
 
 ---
 
-## 📜 同步与致谢
+## 📜 来源与说明
 
-本项目 fork 自 [TheNetsky/Microsoft-Rewards-Script](https://github.com/TheNetsky/Microsoft-Rewards-Script)，`V4-china` 分支基于上游 **v4 分支**（新版 dashboard 架构）做国内本地化：
+本项目基于上游 [TheNetsky/Microsoft-Rewards-Script](https://github.com/TheNetsky/Microsoft-Rewards-Script) 的 **v4 分支**（新版架构）做国内本地化，并在 `v4-dashboard` 分支上增强：
 
 - 中国热搜查询源（gmya.net 聚合百度/头条/抖音/微博/知乎，多源随机 + 限流退避 + appkey 解限流）
 - PushPlus / 微信 ClawBot 微信推送渠道
-- 国内默认值调优（china+local 引擎、搜索间隔 6-12min、防风控默认项）
-- 中文词库（`search-queries.json`）与全量日志中文化
+- 中文词库与全量日志中文化
 - Docker 基础镜像走 m.daocloud.io 加速；浏览器版本接口不可达时自动回退内置版本
+- **内嵌积分看板**（与本容器同进程编排）：账号表格 / 批量勾选运行 / 动态账号管理 / 登录体检 / 人工登录 / 钉钉推送 / 日志落盘挂载
 
-若有侵权请联系删除。
-
-**本项目所有改动基于 Win11 系统测试。其他系统未测试，请根据原项目相关配置设置。**
-
-| 项目         | 信息                                                                                                      |
-| ------------ | --------------------------------------------------------------------------------------------------------- |
-| 上游仓库     | [TheNetsky/Microsoft-Rewards-Script](https://github.com/TheNetsky/Microsoft-Rewards-Script)（v4 分支）    |
-| 本仓库       | [chiihero/Microsoft-Rewards-Script](https://github.com/chiihero/Microsoft-Rewards-Script) `V4-china` 分支 |
-| 当前版本     | 4.3.0                                                                                                     |
-| 最后同步上游 | 2026-08-16                                                                                                |
+| 项目     | 信息                                                                                                   |
+| -------- | ------------------------------------------------------------------------------------------------------ |
+| 上游仓库 | [TheNetsky/Microsoft-Rewards-Script](https://github.com/TheNetsky/Microsoft-Rewards-Script)（v4 分支） |
+| 本仓库   | `rgmyyw/Microsoft-Rewards-Script` · `v4-dashboard` 分支                                                |
 
 ---
 
