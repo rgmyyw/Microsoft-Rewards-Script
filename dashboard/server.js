@@ -279,6 +279,9 @@ function recordEntry(entry) {
     a.balance = balance;
     a.balanceTs = Date.now();
     a.todayCollected = (a.todayCollected || 0) + gained;
+    a.lastEndTs = Date.now();
+    a.partialCollected = 0;
+    a.partialDate = null;
     a.lastStatus = 'success';
     a.lastError = null;
     a.lastRunTs = Date.now();
@@ -297,6 +300,15 @@ function recordEntry(entry) {
       saveState();
     }
   } else if (title === 'RUN-START') {
+    // 收编上一轮遗留的"已得未入账"部分(账号中途失败时, partial 里还留着本次已得积分)
+    for (const em of Object.keys(state.accounts)) {
+      const a = ensureAccount(em);
+      if (a.partialDate === todayStr() && a.partialCollected) {
+        a.todayCollected = (a.todayCollected || 0) + a.partialCollected;
+      }
+      a.partialCollected = 0;
+      a.partialDate = null;
+    }
     state.currentRun = { startedAt: Date.now(), accounts: [], collected: 0, finished: false };
     saveState();
   } else if (title === 'RUN-END') {
@@ -937,10 +949,19 @@ const server = http.createServer(async (req, res) => {
       // 实时余额同步进 state(仅变化时写盘)
       let dirty = false;
       const liveAccounts = (points && points.accounts) || [];
+      const runStartTs = points && points.startedAt ? Date.parse(points.startedAt) : null;
       for (const la of liveAccounts) {
-        if (!la.email || la.balance == null) continue;
+        if (!la.email) continue;
         const a = ensureAccount(la.email);
-        if (a.balance !== la.balance) { a.balance = la.balance; a.balanceTs = Date.now(); dirty = true; }
+        if (la.balance != null && a.balance !== la.balance) { a.balance = la.balance; a.balanceTs = Date.now(); dirty = true; }
+        // 本轮未收到完成事件的账号: 其已得积分记入 partial(完成后由 ACCOUNT-END 正式入账并清零)
+        const endedThisRun = a.lastEndTs != null && runStartTs != null && a.lastEndTs >= runStartTs;
+        const partial = (!endedThisRun && la.collected != null && la.collected > 0) ? la.collected : 0;
+        if ((a.partialCollected || 0) !== partial || a.partialDate !== todayStr()) {
+          a.partialCollected = partial;
+          a.partialDate = todayStr();
+          dirty = true;
+        }
       }
       if (dirty) saveState();
       const mapStatus = (st, live, runningNow) => {
@@ -961,7 +982,7 @@ const server = http.createServer(async (req, res) => {
           email: email,
           balance: st.balance != null ? st.balance : (live.balance != null ? live.balance : null),
           balanceTs: st.balanceTs || null,
-          todayCollected: st.todayCollected || 0,
+          todayCollected: (st.todayCollected || 0) + (st.partialCollected || 0),
           liveCollected: (points && points.running && live.collected != null) ? live.collected : null,
           status: mapStatus(st, live, runningNow),
           lastError: st.lastError || live.error || null,
