@@ -1673,6 +1673,7 @@ function renderAccounts(now) {
   var html = '';
   for (var i = 0; i < accountsCache.length; i++) {
     var a = accountsCache[i];
+    var rowNo = i + 1;
     var liveRunning = !!(runCache && runCache.running && runCache.currentAccount === a.email);
     var isRunning = liveRunning || a.status === 'running';
     var checked = selected[a.index] ? ' checked' : '';
@@ -1684,8 +1685,8 @@ function renderAccounts(now) {
     var err = a.lastError ? '<div class="errtxt" title="' + esc(a.lastError) + '">' + esc(a.lastError) + '</div>' : '';
     html += '<tr>'
       + '<td><input type="checkbox"' + checked + ' onchange="toggleSel(' + a.index + ', this.checked)"></td>'
-      + '<td>' + a.index + '</td>'
-      + '<td class="em">' + esc(a.email) + (a.extra ? ' <span class="badge run">动态</span>' : '') + '</td>'
+      + '<td>' + rowNo + '</td>'
+      + '<td class="em">' + esc(a.email) + '</td>'
       + '<td class="num">' + bal + balTs + '</td>'
       + '<td class="num" style="color:var(--ok)">' + today + live + '</td>'
       + '<td>' + badge(a.status, liveRunning) + '</td>'
@@ -1757,7 +1758,13 @@ function doRun() {
   var idxs = [];
   for (var k in selected) if (selected[k]) idxs.push(Number(k));
   idxs.sort(function (a, b) { return a - b; });
-  var label = n > 0 ? ('选中的 ' + n + ' 个账号（序号 ' + idxs.join(', ') + '）') : ('全部 ' + accountsCache.length + ' 个账号');
+  var names = [];
+  for (var i2 = 0; i2 < accountsCache.length; i2++) {
+    if (n === 0 || selected[accountsCache[i2].index]) {
+      if (names.length < 4) names.push(accountsCache[i2].email);
+    }
+  }
+  var label = n > 0 ? ('选中的 ' + n + ' 个账号：' + names.join('、') + (n > 4 ? ' 等' : '')) : ('全部 ' + accountsCache.length + ' 个账号');
   if (!confirm('确认立即运行积分任务？将运行：' + label + '。约 30-60 分钟，可能触发风控，请谨慎。')) return;
   var body = n > 0 ? JSON.stringify({ indexes: idxs }) : '{}';
   fetch(API.start, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body })
