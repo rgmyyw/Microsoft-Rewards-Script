@@ -275,6 +275,13 @@ function recordEntry(entry) {
     const gained = parseInt(extractField(message, /(?:pointsGained|获得积分)=(-?\d+)/) || '0', 10);
     const balance = parseInt(extractField(message, /(?:currentBalance|现余额)=(\d+)/) || '0', 10);
     const a = ensureAccount(email);
+    if (state.currentRun && state.currentRun.cur && state.currentRun.cur.email === email) {
+      const durMin = Math.max(1, Math.round((Date.now() - state.currentRun.cur.startedAt) / 60000));
+      state.durations = state.durations || [];
+      state.durations.push(durMin);
+      if (state.durations.length > 5) state.durations.shift();
+      state.currentRun.cur = null;
+    }
     // 失败过的账号也保留上次已知余额, 仅在成功完成时刷新
     a.balance = balance;
     a.balanceTs = Date.now();
@@ -297,6 +304,7 @@ function recordEntry(entry) {
       a.lastStatus = 'running';
       a.lastRunTs = Date.now();
       a.lastError = null;
+      if (state.currentRun) state.currentRun.cur = { email, startedAt: Date.now() };
       saveState();
     }
   } else if (title === 'RUN-START') {
@@ -308,8 +316,10 @@ function recordEntry(entry) {
       }
       a.partialCollected = 0;
       a.partialDate = null;
+      a.lastStatus = 'pending';
+      a.lastError = null;
     }
-    state.currentRun = { startedAt: Date.now(), accounts: [], collected: 0, finished: false };
+    state.currentRun = { startedAt: Date.now(), accounts: [], collected: 0, finished: false, cur: null };
     saveState();
   } else if (title === 'RUN-END') {
     // 收尾: 仍处于 running 的账号视为未完成(登录失败被跳过等), 保留其余额仅标记状态
@@ -1006,6 +1016,26 @@ const server = http.createServer(async (req, res) => {
         totalBalance: all.reduce((s, a) => s + (a.balance || 0), 0),
         totalToday: all.reduce((s, a) => s + (a.todayCollected || 0), 0),
       };
+      // 预计完成时间: 最近完成账号的平均耗时 x 剩余账号 + 当前账号剩余
+      let eta = null;
+      if (points && points.live && state.currentRun && state.currentRun.cur) {
+        const durations = state.durations || [];
+        if (durations.length) {
+          const meanMin = durations.reduce((x, y) => x + y, 0) / durations.length;
+          const doneCount = liveAccounts.filter((x) => x.done).length;
+          const curLive = liveAccounts.find((x) => x.email === state.currentRun.cur.email);
+          const pending = Math.max(0, liveAccounts.length - doneCount - (curLive && !curLive.done ? 1 : 0));
+          const elapsedMin = Math.max(0, (Date.now() - state.currentRun.cur.startedAt) / 60000);
+          const remainMin = Math.max(1, Math.round(pending * meanMin + Math.max(meanMin - elapsedMin, 0)));
+          eta = {
+            etaTs: Date.now() + remainMin * 60000,
+            remainMin,
+            meanMin: Math.round(meanMin),
+            pending,
+            sample: durations.length,
+          };
+        }
+      }
       return json(res, 200, {
         today: todayStr(),
         serverTime: Date.now(),
@@ -1017,6 +1047,7 @@ const server = http.createServer(async (req, res) => {
         } : null,
         accounts: all,
         summary: summary,
+        eta: eta,
         schedule: schedule,
         history: state.runs.slice(0, 10),
       });
@@ -1618,6 +1649,12 @@ function renderOverview(d) {
   var ri = $('runInfo');
   if (running) {
     ri.innerHTML = '正在跑: ' + esc(run.currentAccount || '-') + '<br>本次已获得 +' + fmtNum(run.collected);
+    var eta = d.eta;
+    if (eta && eta.etaTs) {
+      var d2 = new Date(eta.etaTs);
+      var p2 = function (n) { return (n < 10 ? '0' : '') + n; };
+      ri.innerHTML += '<br><span class="sub">预计 ' + p2(d2.getHours()) + ':' + p2(d2.getMinutes()) + ' 完成（约 ' + eta.remainMin + ' 分钟，均值 ' + eta.meanMin + ' 分/账号）</span>';
+    }
   } else if (run.collected != null) {
     ri.innerHTML = '上次运行 +' + fmtNum(run.collected) + '<br><span class="sub">' + (run.startedAt ? fmtTs(run.startedAt) : '') + '</span>';
   } else {
