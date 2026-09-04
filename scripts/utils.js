@@ -205,11 +205,13 @@ export function loadAccountsFromEnv(projectRoot) {
     loadEnvFile(projectRoot)
 
     const extras = readRawExtraAccounts(projectRoot)
+    const removed = new Set(extras.filter(e => e.removed === true).map(e => e.email.toLowerCase()))
     const accounts = []
     for (const index of accountIndexesFromEnv()) {
         const idx = String(index)
         const email = envStr(`ACCOUNT_${idx}_EMAIL`)
         if (!email) continue
+        if (removed.has(email.toLowerCase())) continue
 
         accounts.push({
             email,
@@ -236,6 +238,7 @@ export function loadAccountsFromEnv(projectRoot) {
     }
 
     for (const raw of extras) {
+        if (raw.removed === true) continue
         if (accounts.some(a => a.email.toLowerCase() === raw.email.toLowerCase())) continue
         accounts.push(normalizeExtraStandalone(raw))
     }

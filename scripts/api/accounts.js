@@ -36,10 +36,12 @@ export function loadAccounts(sourceEnv = process.env) {
     const accounts = []
     const extras = readRawExtraAccounts(apiProjectRoot)
     const matched = new Set()
+    const removed = new Set(extras.filter(e => e.removed === true).map(e => e.email.toLowerCase()))
 
     for (const i of accountIndexesFromEnv(sourceEnv)) {
         const email = envStrFrom(sourceEnv, `ACCOUNT_${i}_EMAIL`)
         if (!email) continue
+        if (removed.has(email.toLowerCase())) continue
 
         const proxyUrl = envStrFrom(sourceEnv, `ACCOUNT_${i}_PROXY_URL`)
         accounts.push({
@@ -76,6 +78,7 @@ export function loadAccounts(sourceEnv = process.env) {
     extraCache.clear()
     let seq = 0
     for (const entry of extras) {
+        if (entry.removed === true) continue
         if (matched.has(entry.email.toLowerCase())) continue
         const index = EXTRA_BASE_INDEX + seq
         seq += 1

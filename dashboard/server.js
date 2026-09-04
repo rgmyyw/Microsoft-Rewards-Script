@@ -1090,13 +1090,15 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (p === '/api/accounts-manage' && req.method === 'GET') {
+      const list = readExtraFile();
       return json(res, 200, {
-        accounts: readExtraFile().map(e => ({
+        accounts: list.filter(e => e.removed !== true).map(e => ({
           email: e.email,
           geoLocale: e.geoLocale || 'auto',
           hasPassword: Boolean(e.password),
           hasTotp: Boolean(e.totpSecret),
         })),
+        removed: list.filter(e => e.removed === true).map(e => e.email),
       });
     }
     if (p === '/api/accounts-manage' && req.method === 'POST') {
@@ -1108,13 +1110,12 @@ const server = http.createServer(async (req, res) => {
       const totpSecret = String(body.totpSecret || '').trim();
       if (!/^\S+@\S+\.\S+$/.test(email)) return json(res, 400, { error: '邮箱格式不正确' });
       if (!password) return json(res, 400, { error: '密码不能为空' });
-      const list = readExtraFile();
-      if (list.some(e => String(e.email || '').toLowerCase() === email)) {
-        return json(res, 409, { error: '该账号已在动态列表中' });
-      }
       const accs = await fetchJson('/accounts');
-      const envEmails = (((accs || {}).accounts) || []).map(a => String(a.email || '').toLowerCase());
-      if (envEmails.includes(email)) return json(res, 409, { error: '该账号已作为固定账号(环境变量)配置' });
+      const knownEmails = (((accs || {}).accounts) || []).map(a => String(a.email || '').toLowerCase());
+      const list = readExtraFile().filter(e => !(e.removed === true && String(e.email || '').toLowerCase() === email));
+      if (list.some(e => String(e.email || '').toLowerCase() === email)) {
+        return json(res, 409, { error: '该账号已存在' });
+      }
       list.push({ email, password, geoLocale, langCode: 'en', totpSecret });
       if (!writeExtraFile(list)) return json(res, 500, { error: '写入失败' });
       return json(res, 200, { ok: true, count: list.length });
@@ -1123,9 +1124,23 @@ const server = http.createServer(async (req, res) => {
       let body = {};
       try { body = await readBody(req); } catch (e) { body = {}; }
       const email = String(body.email || '').trim().toLowerCase();
+      const accs = await fetchJson('/accounts');
+      const known = (((accs || {}).accounts) || []).map(a => String(a.email || '').toLowerCase());
+      if (!known.includes(email)) return json(res, 404, { error: '未知账号' });
+      if (known.length <= 1) return json(res, 400, { error: '至少需要保留一个账号' });
       const list = readExtraFile();
-      const next = list.filter(e => String(e.email || '').toLowerCase() !== email);
-      if (next.length === list.length) return json(res, 404, { error: '未找到该动态账号' });
+      const isDynamic = list.some(e => String(e.email || '').toLowerCase() === email);
+      let next;
+      if (isDynamic) {
+        next = list.filter(e => String(e.email || '').toLowerCase() !== email);
+      } else {
+        next = list.filter(e => String(e.email || '').toLowerCase() !== email);
+        next.push({ email, removed: true });
+      }
+      const removedAfter = new Set(next.filter(e => e.removed === true).map(e => String(e.email).toLowerCase()));
+      if (!known.some(a => !removedAfter.has(String(a.email || '').toLowerCase()))) {
+        return json(res, 400, { error: '至少需要保留一个账号' });
+      }
       if (!writeExtraFile(next)) return json(res, 500, { error: '写入失败' });
       return json(res, 200, { ok: true, count: next.length });
     }
@@ -1440,10 +1455,10 @@ const HTML = `<!DOCTYPE html>
 
   <dialog id="acctModal">
     <h2>👥 账号管理</h2>
-    <div class="hint">动态账号保存在 config 卷的 accounts.extra.json 中，添加/删除后<b>下一次运行自动生效</b>（每日定时或手动触发均可），无需重启容器。固定账号（来自 .env 环境变量）仅可查看。新增账号首次运行需要自动登录；若遇到微软身份验证卡点，可在表格对应行点 🔑 人工登录完成。</div>
+    <div class="hint">全部账号均可 🔑 改密与 🗑 删除，<b>下一次运行自动生效</b>（每日定时或手动触发均可），无需重启容器；删除的账号重新添加即可恢复。账号数据保存在 config 卷的 accounts.extra.json。新增账号首次运行需要自动登录，若遇微软身份验证卡点，用主表格对应行的 🔑 人工登录完成。</div>
     <table class="hist" style="margin-bottom:14px">
-      <thead><tr><th>账号</th><th>来源</th><th>地区</th><th>2FA</th><th style="width:70px">操作</th></tr></thead>
-      <tbody id="acctRows"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
+      <thead><tr><th>账号</th><th>地区</th><th>2FA</th><th style="width:150px">操作</th></tr></thead>
+      <tbody id="acctRows"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
     </table>
     <div class="grid-2">
       <div>
@@ -1974,30 +1989,28 @@ function closeAccounts() {
   scheduleRefresh();
 }
 function showAcctMsg(txt, ok) { var el = $('acctMsg'); el.textContent = txt; el.style.color = ok ? 'var(--ok)' : 'var(--err)'; }
-var acctManageList = [];
 var acctManageRows = [];
 function renderAcctManage(d) {
+  d = d || {};
   var box = $('acctRows');
   var fileAccounts = d.accounts || [];
-  acctManageList = fileAccounts.slice();
   var all = accountsCache.slice();
   acctManageRows = all;
   for (var i = 0; i < fileAccounts.length; i++) {
     var fa = fileAccounts[i];
     var exists = false;
     for (var j = 0; j < all.length; j++) if (all[j].email && all[j].email.toLowerCase() === fa.email.toLowerCase()) exists = true;
-    if (!exists) all.push({ index: 901 + i, email: fa.email, geoLocale: fa.geoLocale, hasTotp: fa.hasTotp, extra: true, fresh: true });
+    if (!exists) all.push({ email: fa.email, geoLocale: fa.geoLocale, hasTotp: fa.hasTotp, fresh: true });
   }
-  if (!all.length) { box.innerHTML = '<tr><td colspan="5" class="empty">暂无账号</td></tr>'; return; }
+  if (!all.length) { box.innerHTML = '<tr><td colspan="4" class="empty">暂无账号</td></tr>'; return; }
   var html = '';
   for (var k = 0; k < all.length; k++) {
     var a = all[k];
-    var src = a.extra ? '<span class="badge run">动态</span>' : '<span class="badge">固定</span>';
     var del = '<button class="btn small secondary" title="修改微软账号密码，下一次运行生效" onclick="changePass(' + k + ')">🔑 改密</button> '
-      + (a.extra ? '<button class="btn small danger" onclick="delAccount(' + a.index + ')">删除</button>' : '');
+      + '<button class="btn small danger" title="删除账号，下一次运行生效" onclick="delAccount(' + k + ')">🗑 删除</button>';
     var totp = a.hasTotp ? '是' : '-';
     var geo = a.geoLocale || '-';
-    html += '<tr><td>' + esc(a.email) + (a.fresh ? ' <span class="badge err">未运行过</span>' : '') + '</td><td>' + src + '</td><td>' + esc(geo) + '</td><td>' + totp + '</td><td>' + del + '</td></tr>';
+    html += '<tr><td>' + esc(a.email) + (a.fresh ? ' <span class="badge err">未运行过</span>' : '') + '</td><td>' + esc(geo) + '</td><td>' + totp + '</td><td style="white-space:nowrap">' + del + '</td></tr>';
   }
   box.innerHTML = html;
 }
@@ -2015,10 +2028,11 @@ function addAccount() {
     })
     .catch(function (e) { showAcctMsg('添加失败: ' + e.message, false); });
 }
-function delAccount(index) {
-  var entry = acctManageList[index - 901];
-  var email = entry ? entry.email : '#' + index;
-  if (!confirm('删除动态账号 ' + email + '？下一次运行起不再执行该账号。')) return;
+function delAccount(k) {
+  var a = acctManageRows[k];
+  if (!a) return;
+  var email = a.email;
+  if (!confirm('删除账号 ' + email + '？下一次运行起不再执行该账号；重新添加即可恢复。')) return;
   fetch(API.accountsManage + '/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: email }) })
     .then(function (r) { return r.json(); })
     .then(function (d) {

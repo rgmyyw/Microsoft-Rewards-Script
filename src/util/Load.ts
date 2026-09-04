@@ -119,6 +119,24 @@ function getAccountIndexes(): string[] {
         .sort((a, b) => Number(a) - Number(b))
 }
 
+function loadExtraRemovedEmails(): string[] {
+    const filePath = path.join(getProjectRoot(), 'config', 'accounts.extra.json')
+    try {
+        if (!fs.existsSync(filePath)) return []
+        const parsed: unknown = JSON.parse(fs.readFileSync(filePath, 'utf-8'))
+        if (!Array.isArray(parsed)) return []
+        return parsed
+            .filter(
+                (entry): entry is Record<string, unknown> =>
+                    Boolean(entry) && (entry as { removed?: unknown }).removed === true &&
+                    typeof (entry as { email?: unknown }).email === 'string'
+            )
+            .map(entry => String(entry.email).trim().toLowerCase())
+    } catch {
+        return []
+    }
+}
+
 // Dashboard-managed dynamic accounts (config/accounts.extra.json), picked up by
 // every new run process without a container restart. Env accounts keep priority.
 function loadExtraAccounts(): Account[] {
@@ -130,7 +148,8 @@ function loadExtraAccounts(): Account[] {
         return parsed
             .filter(
                 (entry): entry is Record<string, unknown> =>
-                    Boolean(entry) && typeof (entry as { email?: unknown }).email === 'string'
+                    Boolean(entry) && typeof (entry as { email?: unknown }).email === 'string' &&
+                    (entry as { removed?: unknown }).removed !== true
             )
             .map(entry => ({
                 email: String(entry.email).trim(),
@@ -173,9 +192,11 @@ export function loadAccounts(): Account[] {
 
         // Dashboard-managed extras act as an override layer: same email patches
         // the env account (e.g. password rotation), otherwise it is appended.
-        const extras = loadExtraAccounts()
+        const removed = new Set(loadExtraRemovedEmails())
+        const kept: Account[] = []
         for (const account of accounts) {
-            const override = extras.find(e => e.email.toLowerCase() === account.email.toLowerCase())
+            if (removed.has(account.email.toLowerCase())) continue
+            const override = extras.find(e => e.removed !== true && e.email.toLowerCase() === account.email.toLowerCase())
             if (override) {
                 if (override.password) account.password = override.password
                 if (override.geoLocale) account.geoLocale = override.geoLocale
@@ -183,8 +204,12 @@ export function loadAccounts(): Account[] {
                 if (override.totpSecret) account.totpSecret = override.totpSecret
                 if (override.recoveryEmail) account.recoveryEmail = override.recoveryEmail
             }
+            kept.push(account)
         }
+        accounts.length = 0
+        accounts.push(...kept)
         for (const extra of extras) {
+            if (extra.removed === true) continue
             if (!accounts.some(a => a.email.toLowerCase() === extra.email.toLowerCase())) {
                 accounts.push(extra)
             }
