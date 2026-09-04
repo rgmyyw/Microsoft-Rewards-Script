@@ -24,7 +24,7 @@ const tls = require('tls');
 // ============ 常量 ============
 const BASE_DIR = __dirname;
 // 数据目录: 容器内指向脚本 config/ 同卷子目录(持久化); 本地开发默认 dashboard/config
-const CONFIG_DIR = process.env.DASHBOARD_DATA_DIR || path.join(BASE_DIR, 'config');
+const CONFIG_DIR = process.env.DASHBOARD_DATA_DIR || path.join(BASE_DIR, '..', 'config', 'dashboard');
 const PUSH_CONFIG_FILE = path.join(CONFIG_DIR, 'push-config.json');
 const STATE_FILE = path.join(CONFIG_DIR, 'state.json');
 
