@@ -291,6 +291,7 @@ function recordEntry(entry) {
     a.partialDate = null;
     a.lastStatus = 'success';
     a.lastError = null;
+    a.validity = 'valid';
     a.lastRunTs = Date.now();
     if (state.currentRun) {
       state.currentRun.accounts.push({ email, gained, balance });
@@ -355,6 +356,10 @@ function recordEntry(entry) {
         const a = ensureAccount(email);
         a.lastStatus = 'failed';
         a.lastError = message.slice(0, 200);
+        if (/登录失败|登录超时|身份验证|验证身份|需要验证|账户不存在|couldn't find|登录页|sign-in|login failed/i.test(message)) {
+          a.validity = 'need-reauth';
+          a.validityTs = Date.now();
+        }
         saveState();
       }
     }
@@ -519,6 +524,8 @@ function startLoginCheck(accountIndex, email) {
         a.lastStatus = job.result.loggedIn ? 'success' : 'failed';
         a.lastError = job.result.loggedIn ? null : ('登录体检未通过: ' + (first.reason || 'unknown'));
         a.lastCheckTs = Date.now();
+        a.validity = job.result.loggedIn ? 'valid' : (first.reason === 'no-saved-session' ? 'no-session' : 'need-reauth');
+        a.validityTs = Date.now();
         saveState();
       } catch (e) { /* ignore */ }
     }
@@ -993,6 +1000,7 @@ const server = http.createServer(async (req, res) => {
           balance: st.balance != null ? st.balance : (live.balance != null ? live.balance : null),
           balanceTs: st.balanceTs || null,
           todayCollected: (st.todayCollected || 0) + (st.partialCollected || 0),
+          validity: st.validity || null,
           liveCollected: (points && points.running && live.collected != null) ? live.collected : null,
           status: mapStatus(st, live, runningNow),
           lastError: st.lastError || live.error || null,
@@ -1721,6 +1729,7 @@ function renderAccounts(now) {
       + '<button class="btn small secondary" title="查看该账号实时运行日志" onclick="openLogs(' + a.index + ')">📜</button> '
       + '<button class="btn small secondary" title="登录体检: 无头检查会话并刷新实时余额(约 30-60 秒)" onclick="doCheck(' + a.index + ')">🩺</button> '
       + '<button class="btn small secondary" title="人工登录: 在容器内浏览器完成微软验证, 自动保存会话" onclick="doManualLogin(' + a.index + ')">🔑</button>'
+      + (a.validity === 'need-reauth' ? ' <button class="btn small danger" title="该账号需要重新授权: 点击在容器内浏览器完成微软验证" onclick="doManualLogin(' + a.index + ')">🔐 重新授权</button>' : '')
       + checkNote(a)
       + '</td>'
       + '</tr>';
