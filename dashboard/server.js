@@ -1609,6 +1609,10 @@ function fmtAgo(ts, now) {
   if (d < 86400000) return Math.floor(d / 3600000) + ' 小时前';
   return Math.floor(d / 86400000) + ' 天前';
 }
+function fmtDur(min) {
+  var h = Math.floor(min / 60), m = min % 60;
+  return h > 0 ? (h + ' 小时 ' + m + ' 分钟') : (m + ' 分钟');
+}
 function fmtNum(n) {
   if (n == null || isNaN(n)) return '-';
   return Number(n).toLocaleString('zh-CN');
@@ -1649,12 +1653,18 @@ function renderOverview(d) {
   var ri = $('runInfo');
   if (running) {
     ri.innerHTML = '正在跑: ' + esc(run.currentAccount || '-') + '<br>本次已获得 +' + fmtNum(run.collected);
+    var bits = [];
+    if (run.startedAt) {
+      var elMin = Math.max(0, Math.round(((d.serverTime || Date.now()) - run.startedAt) / 60000));
+      bits.push('已运行 ' + fmtDur(elMin));
+    }
     var eta = d.eta;
     if (eta && eta.etaTs) {
       var d2 = new Date(eta.etaTs);
       var p2 = function (n) { return (n < 10 ? '0' : '') + n; };
-      ri.innerHTML += '<br><span class="sub">预计 ' + p2(d2.getHours()) + ':' + p2(d2.getMinutes()) + ' 完成（约 ' + eta.remainMin + ' 分钟，均值 ' + eta.meanMin + ' 分/账号）</span>';
+      bits.push('预计 ' + p2(d2.getHours()) + ':' + p2(d2.getMinutes()) + ' 完成（剩 ' + fmtDur(eta.remainMin) + '，均值 ' + eta.meanMin + ' 分/账号）');
     }
+    if (bits.length) ri.innerHTML += '<br><span class="sub">' + bits.join(' · ') + '</span>';
   } else if (run.collected != null) {
     ri.innerHTML = '上次运行 +' + fmtNum(run.collected) + '<br><span class="sub">' + (run.startedAt ? fmtTs(run.startedAt) : '') + '</span>';
   } else {
