@@ -240,6 +240,8 @@ export class MicrosoftRewardsBot {
 
     async initialize(): Promise<void> {
         this.accounts = loadAccounts()
+        // 每次运行打乱账号执行顺序, 避免固定顺序被识别为机器人行为
+        this.accounts = this.utils.shuffleArray(this.accounts)
         this.warnExperimental()
     }
 
