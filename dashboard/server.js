@@ -115,6 +115,25 @@ function loadState() {
     state.v = 2;
     saveState();
   }
+  // v3 一次性迁移: 引入"当日余额锚点"(余额接口口径的今日获得), 用最近一次今天结束的运行
+  // 反推各账号当日初始余额(初始 = 现余额 - 获得积分), 保证升级当天显示连续
+  if (state.v === 2) {
+    const t = todayStr();
+    const lastRun = (state.runs || []).find(r => {
+      const d = r && (r.endedAt || r.startedAt);
+      return d && new Date(d + 8 * 3600e3).toISOString().slice(0, 10) === t;
+    });
+    for (const em of Object.keys(state.accounts)) {
+      const a = state.accounts[em];
+      if (!a || typeof a !== 'object' || a.dayStartDate != null) continue;
+      a.dayStartDate = t;
+      const ra = lastRun && (lastRun.accounts || []).find(x => x && x.email === em);
+      if (ra && ra.balance != null && ra.gained != null) a.dayStartBalance = ra.balance - ra.gained;
+      else if (a.balance != null) a.dayStartBalance = a.balance;
+    }
+    state.v = 3;
+    saveState();
+  }
 }
 function saveState() {
   try {
@@ -132,6 +151,33 @@ function ensureAccount(email) {
   if (!a || typeof a !== 'object') a = state.accounts[email] = { email };
   if (a.todayDate !== todayStr()) { a.todayDate = todayStr(); a.todayCollected = 0; }
   return a;
+}
+// 余额观测统一入口(ACCOUNT-END / 体检 / overview 实时同步都走这里):
+// 维护"当日余额锚点"(dayStartDate/dayStartBalance), "今日获得"优先按微软余额接口口径
+// = 当前余额 - 当日锚点, 微软侧的一次性奖励/回收/调整都会如实反映, 不再依赖日志逐笔累计
+function recordBalance(a, balance) {
+  if (balance == null || typeof balance !== 'number' || !(balance >= 0)) return;
+  const t = todayStr();
+  if (a.dayStartDate !== t) {
+    // 跨天(或首次观测): 用今天之前最后一次已知余额作当日锚点; 没有历史则用本次观测值
+    a.dayStartDate = t;
+    a.dayStartBalance = (a.balance != null && a.balanceTs != null) ? a.balance : balance;
+  }
+  a.balance = balance;
+  a.balanceTs = Date.now();
+}
+// 日志事件 user 字段是邮箱本地部分(如 "37719093"), 无 @; 维护 本地部分 -> 完整邮箱 映射,
+// 供消息体内不含邮箱的事件(CLAIM-BONUS-POINTS 等)归属账号
+const tagEmail = new Map();
+function registerTagEmail(email) {
+  const em = String(email || '').trim();
+  if (em && em.indexOf('@') > 0) tagEmail.set(em.split('@')[0].toLowerCase(), em);
+}
+function resolveEventEmail(message, entry) {
+  const direct = extractEmail(message, entry && entry.user);
+  if (direct && direct.indexOf('@') > 0) return direct;
+  const tag = String((entry && entry.user) || '').toLowerCase();
+  return tagEmail.get(tag) || null;
 }
 // 日志消息中提取邮箱(去掉尾部标点, 如 "xxx@qq.com:")
 function extractEmail(message, fallback) {
@@ -275,6 +321,7 @@ function recordEntry(entry) {
     const gained = parseInt(extractField(message, /(?:pointsGained|获得积分)=(-?\d+)/) || '0', 10);
     const balance = parseInt(extractField(message, /(?:currentBalance|现余额)=(\d+)/) || '0', 10);
     const a = ensureAccount(email);
+    registerTagEmail(email);
     if (state.currentRun && state.currentRun.cur && state.currentRun.cur.email === email) {
       const durMin = Math.max(1, Math.round((Date.now() - state.currentRun.cur.startedAt) / 60000));
       state.durations = state.durations || [];
@@ -283,8 +330,7 @@ function recordEntry(entry) {
       state.currentRun.cur = null;
     }
     // 失败过的账号也保留上次已知余额, 仅在成功完成时刷新
-    a.balance = balance;
-    a.balanceTs = Date.now();
+    recordBalance(a, balance);
     a.todayCollected = (a.todayCollected || 0) + gained;
     a.lastEndTs = Date.now();
     a.partialCollected = 0;
@@ -298,10 +344,13 @@ function recordEntry(entry) {
       state.currentRun.collected += gained;
     }
     saveState();
+    // 该账号跑完后 90s 用轻量探针实测任务/余额(不开浏览器, 运行中安全)
+    scheduleAccountTaskSync(email, 90000);
   } else if (title === 'ACCOUNT-START') {
     const email = extractField(message, /(?:Starting account|开始处理账户)[:：]\s*(\S+)/) || extractEmail(message, entry.user);
     if (email) {
       const a = ensureAccount(email);
+      registerTagEmail(email);
       a.lastStatus = 'running';
       a.lastRunTs = Date.now();
       a.lastError = null;
@@ -347,7 +396,23 @@ function recordEntry(entry) {
       if (state.runs.length > HISTORY_KEEP) state.runs.length = HISTORY_KEEP;
       state.currentRun = null;
     }
+    autoRetry.active = false; // 运行结束, 释放补跑标记
+    // 运行结束后自动同步各账号实时余额(接口口径; 延迟 90s 等微软侧积分落定)
+    scheduleAutoSync(90000);
     saveState();
+  } else if (title === 'CLAIM-BONUS-POINTS') {
+    // "领取全部待领奖励"完成事件: 按账号累计当日一次性奖励(仅 INFO 完成行, 0 分跳过),
+    // 前端在"今日获得"下标注"含一次性奖励 X"
+    const gained = parseInt(extractField(message, /pointsGained=(\d+)/) || '0', 10);
+    if (level === 'info' && /领取奖励积分完成/.test(message) && gained > 0) {
+      const email = resolveEventEmail(message, entry);
+      if (email && email.indexOf('@') > 0) {
+        const a = ensureAccount(email);
+        if (a.bonusDate !== todayStr()) { a.bonusDate = todayStr(); a.bonusCollected = 0; }
+        a.bonusCollected = (a.bonusCollected || 0) + gained;
+        saveState();
+      }
+    }
   } else if (level === 'error' || title.indexOf('ERROR') >= 0) {
     // 错误事件: 关联到具体账号则标记失败并记录原因(不动余额)
     if (title.indexOf('RUN') < 0) {
@@ -467,7 +532,7 @@ function proxyContainerApi(reqPath, method, body, res) {
 // ============ 登录体检(无头会话检查 + 实时余额) ============
 // 复用 scripts/main/loginCheck.js(与主脚本同一会话存取逻辑), 后台任务化并轮询结果
 const PROJECT_ROOT = path.join(BASE_DIR, '..');
-const LOGIN_CHECK_TIMEOUT_MS = 180000;
+const LOGIN_CHECK_TIMEOUT_MS = 300000;
 const loginCheckJobs = new Map(); // id -> job
 
 function startLoginCheck(accountIndex, email) {
@@ -493,7 +558,7 @@ function startLoginCheck(accountIndex, email) {
   };
   const child = spawn('node',
     [path.join(PROJECT_ROOT, 'scripts/main/loginCheck.js'), '--email', email, '--platform', 'both'],
-    { cwd: PROJECT_ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    { cwd: PROJECT_ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   const feed = (c) => {
     buf += c.toString();
     let idx;
@@ -505,7 +570,8 @@ function startLoginCheck(accountIndex, email) {
   child.stdout.on('data', feed);
   child.stderr.on('data', feed);
   const timer = setTimeout(() => {
-    try { child.kill('SIGKILL'); } catch (e) { /* ignore */ }
+    // 整进程组击杀(负 PID), 连同浏览器子进程一起终止, 防止孤儿进程变僵尸占满 pids 上限
+    try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { try { child.kill('SIGKILL'); } catch (e2) { /* ignore */ } }
     job.status = job.result ? 'done' : 'error';
     job.error = job.error || '体检超时';
   }, LOGIN_CHECK_TIMEOUT_MS);
@@ -519,13 +585,19 @@ function startLoginCheck(accountIndex, email) {
       // 体检结果直接落到账号状态(余额/体检时间), 前端刷新即可见
       try {
         const a = ensureAccount(job.result.email);
-        if (job.result.balance != null) { a.balance = job.result.balance; a.balanceTs = Date.now(); }
+        if (job.result.balance != null) recordBalance(a, job.result.balance);
         const first = Object.values(job.result.platforms || {})[0] || {};
         a.lastStatus = job.result.loggedIn ? 'success' : 'failed';
-        a.lastError = job.result.loggedIn ? null : ('登录体检未通过: ' + (first.reason || 'unknown'));
+        a.lastError = job.result.loggedIn ? null : (first.reason === 'no-saved-session'
+          ? '新账号还没有已保存的登录会话, 体检无法代替登录: 请点 🔑 人工登录完成一次微软登录, 或勾选该账号点 ▶ 运行(脚本会用保存的密码自动登录)'
+          : ('登录体检未通过: ' + (first.reason || 'unknown')));
         a.lastCheckTs = Date.now();
         a.validity = job.result.loggedIn ? 'valid' : (first.reason === 'no-saved-session' ? 'no-session' : 'need-reauth');
         a.validityTs = Date.now();
+        // 任务完成度(微软接口逐项实测: 当日每日任务集+搜索计数器+打卡子任务)
+        if (job.result.tasks) {
+          a.tasks = Object.assign({ date: todayStr(), ts: Date.now() }, job.result.tasks);
+        }
         saveState();
       } catch (e) { /* ignore */ }
     }
@@ -544,6 +616,233 @@ function loginCheckStatus() {
     })),
     running: jobs.some(j => j.status === 'running'),
   };
+}
+
+// ============ 全账号余额同步(接口口径) ============
+// 逐个账号串行跑 loginCheck(无头恢复会话 → rewards getuserinfo 接口读实时余额),
+// 结果经 recordBalance 落到当日锚点。RUN-END 后自动触发一次, 也可手动点按钮。
+let syncAll = null; // { status, trigger, startedAt, finishedAt, queue, current, results }
+let syncAllTimer = null;
+
+// ==== 任务数据自动补齐: 存在"今日无实测数据"的有效账号且容器空闲时, 自动发起同步 ====
+function needsTaskSync() {
+  const t = todayStr();
+  for (const em of Object.keys(state.accounts)) {
+    if (em.indexOf('@') < 0) continue;
+    const a = state.accounts[em];
+    if (!a) continue;
+    if (a.validity === 'need-reauth' || a.validity === 'no-session') continue;
+    // 2 小时内已尝试过则不重复(避免个别接口不返回的账号被无限刷); 超过 2 小时允许重试
+    const recentAttempt = a.lastCheckTs && (Date.now() - a.lastCheckTs) < 2 * 3600e3;
+    if (recentAttempt) continue;
+    if (!a.tasks || a.tasks.date !== t) return true;
+  }
+  return false;
+}
+function taskSyncCatchup(trigger) {
+  if (syncAll && syncAll.status === 'running') return;
+  if (!needsTaskSync()) return;
+  log('INFO', '检测到有账号缺少今日任务实测数据, 自动发起同步 (' + trigger + ')');
+  syncAllStart('task-catchup');
+}
+setInterval(() => { try { taskSyncCatchup('periodic-30min'); } catch (e) { /* ignore */ } }, 30 * 60 * 1000);
+
+// ==== 任务未完成自动补跑(每日最多一次) ====
+// 数据同步完成后检测: 有实测数据的账号未全部通过, 或无明细账号当日积分低于阈值
+// → 只对未完成的账号自动发起一次补跑(其余账号加入排除列表)。北京时间 21 点后不发起。
+const AUTO_RETRY_MIN_POINTS = Number(process.env.AUTO_RETRY_MIN_POINTS || 50);
+const AUTO_RETRY_LAST_HOUR = 21;
+const autoRetry = { lastDate: '', active: false };
+
+function beijingHour() {
+  return new Date(Date.now() + 8 * 3600e3).getUTCHours();
+}
+
+function accountNeedsRetry(a, t) {
+  if (!a || typeof a !== 'object' || !a.email || a.email.indexOf('@') < 0) return false;
+  if (a.validity === 'need-reauth' || a.validity === 'no-session') return false;
+  if (a.tasks && a.tasks.date === t) return a.tasks.allDone !== true;
+  if (a.tasksNA === t) return (a.todayCollected || 0) < AUTO_RETRY_MIN_POINTS;
+  return true; // 无任何实测数据: 视为未跑
+}
+
+async function maybeAutoRetryRun(trigger) {
+  const t = todayStr();
+  if (autoRetry.lastDate === t || autoRetry.active) return;
+  if (beijingHour() >= AUTO_RETRY_LAST_HOUR) return;
+  const pts = await fetchJson('/points');
+  if (pts && pts.running) return; // 有运行在进行, 不发起
+  const retryEmails = [];
+  for (const em of Object.keys(state.accounts)) {
+    if (accountNeedsRetry(state.accounts[em], t)) retryEmails.push(em);
+  }
+  if (!retryEmails.length) return;
+  const accs = await fetchJson('/accounts');
+  const list = (((accs || {}).accounts) || []);
+  const retryIndexes = list.filter(x => retryEmails.indexOf(x.email) >= 0).map(x => x.index);
+  if (!retryIndexes.length) return;
+  autoRetry.lastDate = t;
+  autoRetry.active = true;
+  const excluded = list.filter(x => retryEmails.indexOf(x.email) < 0).map(x => x.index);
+  const payload = excluded.length ? { excludedAccountIndexes: excluded } : {};
+  log('INFO', '任务未完成自动补跑 (' + trigger + '): ' + retryEmails.join(', '));
+  await postJson('/start', payload);
+}
+
+// 轻量任务/余额探针: 读会话库 cookies 直接调 rewards getuserinfo(不开浏览器),
+// 与运行并行安全, 单号约 1-2 秒; 结果落到当日锚点与任务完成度
+const taskProbeJobs = new Map(); // email -> 上次探测时间戳(30s 防抖)
+function runTaskProbe(email) {
+  return new Promise((resolve) => {
+    const last = taskProbeJobs.get(email) || 0;
+    if (Date.now() - last < 30000) return resolve({ email, ok: false, reason: '30s 内已探测过' });
+    taskProbeJobs.set(email, Date.now());
+    let buf = '';
+    let result = null;
+    const child = spawn('node',
+      [path.join(PROJECT_ROOT, 'scripts/main/taskProbe.js'), '--email', email],
+      { cwd: PROJECT_ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) { /* ignore */ } }, 45000);
+    const feed = (c) => {
+      buf += c.toString();
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        const m = line.match(/TASKPROBE_RESULT (\{.*\})/);
+        if (m) { try { result = JSON.parse(m[1]); } catch (e) { /* ignore */ } }
+      }
+    };
+    child.stdout.on('data', feed);
+    child.stderr.on('data', feed);
+    child.on('exit', () => {
+      clearTimeout(timer);
+      if (result && (result.balance != null || result.tasks)) {
+        try {
+          const em = result.email || email;
+          const a = ensureAccount(em);
+          registerTagEmail(em);
+          if (result.balance != null) recordBalance(a, result.balance);
+          if (result.tasks) a.tasks = Object.assign({ date: todayStr(), ts: Date.now() }, result.tasks);
+          else a.tasksNA = todayStr(); // 接口不返回任务明细(仅余额可得)
+          a.lastCheckTs = Date.now();
+          a.validity = 'valid';
+          saveState();
+        } catch (e) { /* ignore */ }
+      }
+      resolve(result || { email, ok: false, reason: 'no-result' });
+    });
+  });
+}
+
+// 单账号任务实测调度(ACCOUNT-END 后触发): 轻量探针, 运行中也可安全执行
+const pendingAccountSync = new Set();
+function scheduleAccountTaskSync(email, delayMs) {
+  if (!email || pendingAccountSync.has(email)) return;
+  pendingAccountSync.add(email);
+  setTimeout(() => {
+    pendingAccountSync.delete(email);
+    runTaskProbe(email).then(r => {
+      log('INFO', '账号 ' + email + ' 任务实测: ' + JSON.stringify({ balance: r.balance, tasks: r.tasks }));
+    }).catch(() => { /* ignore */ });
+  }, delayMs);
+}
+
+function syncAllSummary() {
+  if (!syncAll) return null;
+  return {
+    status: syncAll.status,
+    trigger: syncAll.trigger,
+    startedAt: syncAll.startedAt,
+    finishedAt: syncAll.finishedAt,
+    current: syncAll.current,
+    done: syncAll.results.length,
+    total: syncAll.results.length + syncAll.queue.length + (syncAll.current ? 1 : 0),
+    failed: syncAll.results.filter(r => !r.ok).length,
+  };
+}
+
+function scheduleAutoSync(delayMs = 90000) {
+  if (syncAllTimer) clearTimeout(syncAllTimer);
+  syncAllTimer = setTimeout(() => {
+    syncAllTimer = null;
+    try { syncAllStart('run-end'); } catch (e) { /* ignore */ }
+  }, delayMs);
+}
+
+function syncAllStart(trigger) {
+  if (syncAll && syncAll.status === 'running') return { error: '余额同步已在进行中', code: 'BUSY' };
+  syncAll = { status: 'running', trigger, startedAt: Date.now(), finishedAt: null, queue: [], current: null, results: [] };
+  const candidates = (list) => list.filter(acc => {
+    const st = state.accounts[acc.email];
+    return !st || (st.validity !== 'need-reauth' && st.validity !== 'no-session');
+  });
+  fetchJson('/accounts').then(accs => {
+    if (!syncAll || syncAll.status !== 'running') return;
+    syncAll.queue = candidates((((accs || {}).accounts) || [])).map(a => ({ index: a.index, email: a.email }));
+    runNextSync();
+  }).catch(() => {
+    if (!syncAll || syncAll.status !== 'running') return;
+    syncAll.queue = candidates(
+      Object.keys(state.accounts)
+        .filter(em => em && em.indexOf('@') > 0)
+        .map((em, i) => ({ index: i + 1, email: em }))
+    );
+    runNextSync();
+  });
+  return { ok: true };
+}
+
+async function runNextSync() {
+  if (!syncAll || syncAll.status !== 'running') return;
+  const next = syncAll.queue.shift();
+  if (!next) {
+    syncAll.status = 'done';
+    syncAll.finishedAt = Date.now();
+    const trig = syncAll.trigger || 'sync';
+    setTimeout(() => { try { maybeAutoRetryRun(trig); } catch (e) { /* ignore */ } }, 5000);
+    return;
+  }
+  syncAll.current = next.email;
+  let r = await runTaskProbe(next.email);
+  let ok = !!(r && r.ok !== false && r.balance != null);
+  if (!ok) {
+    // 探针失败(个别账号接口不配合): 空闲时回退浏览器体检(会话核验+刷新 cookie)
+    try {
+      const pNow = await fetchJson('/points');
+      if (!pNow || !pNow.running) {
+        const lr = await runLoginCheckFallback(next.email);
+        if (lr && lr.loggedIn) { ok = true; r = lr; }
+      }
+    } catch (e) { /* ignore */ }
+  }
+  if (!syncAll || syncAll.status !== 'running') return;
+  syncAll.results.push({
+    email: next.email,
+    ok,
+    balance: r ? r.balance : null,
+  });
+  saveState();
+  syncAll.current = null;
+  setTimeout(runNextSync, 1000);
+}
+
+// 浏览器体检回退(loginCheck): 结果已由其退出处理器写入账号状态
+function runLoginCheckFallback(email) {
+  return new Promise((resolve) => {
+    fetchJson('/accounts').then(accs => {
+      const acc = (((accs || {}).accounts) || []).find(x => x.email === email);
+      if (!acc) return resolve(null);
+      const r = startLoginCheck(acc.index, email);
+      if (r.error) return resolve(null);
+      const wait = () => {
+        const job = [...loginCheckJobs.values()].find(j => j.id === r.id);
+        if (!job || job.status !== 'running') { resolve(job ? job.result : null); return; }
+        setTimeout(wait, 3000);
+      };
+      setTimeout(wait, 3000);
+    }).catch(() => resolve(null));
+  });
 }
 
 // ============ 人工登录(Xvfb + x11vnc + websockify + 上游 manualLogin) ============
@@ -568,7 +867,8 @@ function mlCleanupProcs(session) {
   for (const key of ['runner', 'websockify', 'x11vnc', 'xvfb']) {
     const p = session.procs[key];
     if (!p) continue;
-    try { p.kill('SIGKILL'); } catch (e) { /* ignore */ }
+    // 整进程组击杀(负 PID), 连同浏览器子进程一起终止
+    try { process.kill(-p.pid, 'SIGKILL'); } catch (e) { try { p.kill('SIGKILL'); } catch (e2) { /* ignore */ } }
     session.procs[key] = null;
   }
 }
@@ -609,9 +909,20 @@ async function startManualLogin(accountIndex) {
   procs.websockify = spawn('websockify',
     ['--web', ML_NOVNC_WEB, '127.0.0.1:' + ML_WS_PORT, '127.0.0.1:' + ML_VNC_PORT],
     { env: process.env });
+  // 等 websockify 真正开始监听再返回 token: python 冷启动可能要数秒, 若前端 iframe
+  // 首次加载 vnc.html 撞上未监听会得到 502"noVNC 未就绪"且 iframe 不会重试(2026-09-05 修复)
+  for (let i = 0; i < 60; i++) {
+    const up = await new Promise((resolve) => {
+      const s = net.connect(ML_WS_PORT, '127.0.0.1', () => { s.destroy(); resolve(true); });
+      s.on('error', () => resolve(false));
+      s.setTimeout(250, () => { try { s.destroy(); } catch (e) { /* ignore */ } resolve(false); });
+    });
+    if (up) break;
+    await new Promise(r => setTimeout(r, 250));
+  }
   procs.runner = spawn('node',
     [path.join(PROJECT_ROOT, 'scripts/main/manualLogin.js'), '--email', email, '--platform', 'both'],
-    { cwd: PROJECT_ROOT, env: Object.assign({}, process.env, { DISPLAY: ML_DISPLAY }) });
+    { cwd: PROJECT_ROOT, env: Object.assign({}, process.env, { DISPLAY: ML_DISPLAY }), detached: true });
 
   session.watchdog = setTimeout(() => {
     mlPushLog(session, '[dashboard] 会话超时(20 分钟), 自动结束');
@@ -631,6 +942,20 @@ async function startManualLogin(accountIndex) {
       // 找出 runner 的报错行, 透出到状态接口方便定位
       const errLine = [...session.logs].reverse().find(l => /ERROR|error|Failed|failed|doesn't exist|not found/i.test(l));
       session.failLog = errLine || session.logs[session.logs.length - 2] || null;
+    } else {
+      // 人工登录成功(会话已保存): 立即翻转授权状态, 去掉 🔐 重新授权 标记(2026-09-05 修复)
+      try {
+        const a = ensureAccount(email);
+        registerTagEmail(email);
+        a.validity = 'valid';
+        a.validityTs = Date.now();
+        a.lastStatus = 'success';
+        a.lastError = null;
+        a.lastCheckTs = Date.now();
+        saveState();
+      } catch (e) { /* ignore */ }
+      // 顺带做一次体检: 经接口读实时余额并复核刚保存的会话(若实际未通过会如实改回)
+      setTimeout(() => { try { startLoginCheck(session.accountIndex, email); } catch (e) { /* ignore */ } }, 5000);
     }
     setTimeout(() => { mlCleanupProcs(session); }, 2000);
   });
@@ -833,6 +1158,27 @@ function sendEventEmail(lines) {
 // ============ 每账号运行日志缓存(SSE 流按账号标签环形缓存) ============
 const ACCOUNT_LOG_KEEP = 300
 const accountLogs = new Map() // user 标签 -> [{ts, level, platform, title, message}]
+// ============ 账号历史日志(按天读脚本日志文件 logs/YYYY-MM-DD.log, 保留 7 天) ============
+const SCRIPT_LOGS_DIR = path.join(PROJECT_ROOT, 'logs')
+const HISTORY_KEEP_DAYS = 7
+function pruneOldLogFiles() {
+  const cutoff = Date.now() - HISTORY_KEEP_DAYS * 24 * 60 * 60 * 1000
+  try {
+    for (const f of fs.readdirSync(SCRIPT_LOGS_DIR)) {
+      const m = /^(\d{4})-(\d{2})-(\d{2})\.log$/.exec(f)
+      if (!m) continue
+      const t = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 23, 59, 59).getTime()
+      if (t < cutoff) { try { fs.unlinkSync(path.join(SCRIPT_LOGS_DIR, f)); log('INFO', '已清理超期日志文件: ' + f); } catch (e) { /* ignore */ } }
+    }
+  } catch (e) { /* ignore */ }
+}
+function accountLogDates() {
+  try {
+    return fs.readdirSync(SCRIPT_LOGS_DIR)
+      .map(f => { const m = /^(\d{4}-\d{2}-\d{2})\.log$/.exec(f); return m ? m[1] : null })
+      .filter(Boolean).sort().reverse()
+  } catch (e) { return [] }
+}
 function pushAccountLog(entry) {
   const tag = String(entry.user || '').trim()
   if (!tag) return
@@ -966,13 +1312,19 @@ const server = http.createServer(async (req, res) => {
       // 实时余额同步进 state(仅变化时写盘)
       let dirty = false;
       const liveAccounts = (points && points.accounts) || [];
-      const runStartTs = points && points.startedAt ? Date.parse(points.startedAt) : null;
+      // partial 仅在运行进行中(points.running 且 startedAt 非空)同步:
+      // 空闲时 /points 返回的是上一轮结果(startedAt=null, accounts[].collected 保留),
+      // 若照常同步会把已完成账号的整轮积分重新写进 partial, 与 ACCOUNT-END
+      // 已入账的 todayCollected 叠加导致"今日获得"翻倍(2026-09-05 修复)
+      const runStartTs = points && points.running && points.startedAt ? Date.parse(points.startedAt) : null;
+      const runActive = runStartTs != null && !Number.isNaN(runStartTs);
       for (const la of liveAccounts) {
         if (!la.email) continue;
         const a = ensureAccount(la.email);
-        if (la.balance != null && a.balance !== la.balance) { a.balance = la.balance; a.balanceTs = Date.now(); dirty = true; }
+        if (la.balance != null && (a.balance !== la.balance || a.dayStartDate !== todayStr())) { recordBalance(a, la.balance); dirty = true; }
+        if (!runActive) continue;
         // 本轮未收到完成事件的账号: 其已得积分记入 partial(完成后由 ACCOUNT-END 正式入账并清零)
-        const endedThisRun = a.lastEndTs != null && runStartTs != null && a.lastEndTs >= runStartTs;
+        const endedThisRun = a.lastEndTs != null && a.lastEndTs >= runStartTs;
         const partial = (!endedThisRun && la.collected != null && la.collected > 0) ? la.collected : 0;
         if ((a.partialCollected || 0) !== partial || a.partialDate !== todayStr()) {
           a.partialCollected = partial;
@@ -983,23 +1335,46 @@ const server = http.createServer(async (req, res) => {
       if (dirty) saveState();
       const mapStatus = (st, live, runningNow) => {
         if (runningNow) return 'running';
-        if (st.lastStatus) return st.lastStatus;
-        if (st.success === true) return 'success';
-        if (st.success === false) return 'failed';
-        if (live && live.done && live.success === true) return 'success';
-        if (live && live.done && live.success === false) return 'failed';
-        return 'pending';
+        // 状态列 = 任务视角(待开始/进行中/已完成): 已完成必须经微软接口逐项实测全部通过;
+        // 无实测数据(今日未体检/同步)时一律待开始, 不虚标
+        const tk = (st && st.tasks && st.tasks.date === todayStr()) ? st.tasks : null;
+        if (tk) {
+          // 数据早于该账号最近一次运行完成时刻 → 已过期, 不按旧数据定状态
+          const stale = tk.ts < (st.lastEndTs || st.lastRunTs || 0);
+          if (!stale) {
+            if (tk.allDone) return 'done';
+            const dn = (tk.dailysetDone || 0) + (tk.searchDone || 0) + (tk.punchDone || 0);
+            const tt = (tk.dailysetTotal || 0) + (tk.searchTotal || 0) + (tk.punchTotal || 0);
+            if (tt > 0 && dn > 0) return 'progress';
+          }
+        }
+        // 该账号的任务明细微软接口不返回(仅余额可得)且运行已成功完成 → 已完成
+        if (st.tasksNA === todayStr() && st.lastStatus === 'success') return 'done';
+        // 已成功运行但任务数据缺失/过期 → 已运行·待同步(运行结束的自动同步会补上)
+        if (st.lastStatus === 'success') return 'sync-pending';
+        return 'notstarted';
       };
       const build = (index, email, st, live) => {
         st = st || {};
         live = live || {};
         const runningNow = !!(points && points.running && points.currentAccount === email);
+        // "今日获得"优先按微软余额接口口径: 当前余额 - 当日锚点(含一次性奖励/微软侧调整, 自校准);
+        // 无锚点数据时回退日志累计
+        const t = todayStr();
+        const byBalance = (st.dayStartDate === t && st.dayStartBalance != null && st.balance != null)
+          ? st.balance - st.dayStartBalance
+          : null;
         return {
           index: index,
           email: email,
           balance: st.balance != null ? st.balance : (live.balance != null ? live.balance : null),
           balanceTs: st.balanceTs || null,
-          todayCollected: (st.todayCollected || 0) + (st.partialCollected || 0),
+          todayCollected: byBalance != null ? byBalance : (st.todayCollected || 0) + (st.partialCollected || 0),
+          todaySource: byBalance != null ? 'balance' : 'log',
+          bonusCollected: st.bonusDate === t ? (st.bonusCollected || 0) : 0,
+          tasksNA: st.tasksNA === t,
+          tasksNA: st.tasksNA === t,
+          todayTasks: (st.tasks && st.tasks.date === t) ? st.tasks : null,
           validity: st.validity || null,
           liveCollected: (points && points.running && live.collected != null) ? live.collected : null,
           status: mapStatus(st, live, runningNow),
@@ -1057,6 +1432,7 @@ const server = http.createServer(async (req, res) => {
         summary: summary,
         eta: eta,
         schedule: schedule,
+        sync: syncAllSummary(),
         history: state.runs.slice(0, 10),
       });
     }
@@ -1075,6 +1451,11 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/login-check/status' && req.method === 'GET') {
       return json(res, 200, loginCheckStatus());
+    }
+    if (p === '/api/sync-all' && req.method === 'POST') {
+      const r = syncAllStart('manual');
+      if (r.error) return json(res, r.code === 'BUSY' ? 409 : 400, r);
+      return json(res, 202, r);
     }
     if (p === '/api/manual-login' && req.method === 'POST') {
       let body = {};
@@ -1158,6 +1539,27 @@ const server = http.createServer(async (req, res) => {
       const arr = accountLogs.get(user) || [];
       const lines = arr.slice(-200).map((e) => '[' + new Date(e.ts).toLocaleString('zh-CN') + '] [' + e.level + '] ' + e.platform + ' [' + e.title + '] ' + e.message);
       return json(res, 200, { user, lines, count: lines.length });
+    }
+    if (p === '/api/account-log-dates' && req.method === 'GET') {
+      return json(res, 200, { dates: accountLogDates() });
+    }
+    if (p === '/api/account-history' && req.method === 'GET') {
+      const user = (url.searchParams.get('user') || '').trim();
+      const date = url.searchParams.get('date') || '';
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return json(res, 400, { error: 'date 无效' });
+      const tag = user.split('@')[0].replace(/[^\w.-]/g, '');
+      if (!tag) return json(res, 400, { error: 'user 无效' });
+      let lines = [];
+      try {
+        const file = path.join(SCRIPT_LOGS_DIR, date + '.log');
+        if (fs.existsSync(file)) {
+          lines = fs.readFileSync(file, 'utf8').split('\n')
+            .filter(l => l.indexOf('[' + tag + ']') >= 0)
+            .map(l => l.length > 600 ? l.slice(0, 600) + '…' : l);
+          if (lines.length > 1000) lines = lines.slice(-1000);
+        }
+      } catch (e) { /* 读失败返回空 */ }
+      return json(res, 200, { user, date, lines, count: lines.length });
     }
     if (p === '/api/capabilities' && req.method === 'GET') {
       const cfg = await fetchJson('/config');
@@ -1248,6 +1650,32 @@ function fetchJson(apiPath) {
   });
 }
 
+function postJson(apiPath, body) {
+  return new Promise((resolve) => {
+    if (!API_TOKEN) return resolve(null);
+    const data = JSON.stringify(body || {});
+    const req = http.request(
+      {
+        hostname: '127.0.0.1', port: API_PORT, path: apiPath, method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + API_TOKEN,
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(data)
+        }
+      },
+      (r) => {
+        let b = '';
+        r.on('data', (c) => (b += c));
+        r.on('end', () => { try { resolve(JSON.parse(b)); } catch (e) { resolve({ raw: b }); } });
+      }
+    );
+    req.on('error', () => resolve(null));
+    req.setTimeout(15000, () => { req.destroy(); resolve(null); });
+    req.write(data);
+    req.end();
+  });
+}
+
 // ============ 前端页面 ============
 // 注意: 本 HTML 位于反引号模板字符串内 —— 内联 JS 禁用反引号/模板插值/${ 与反斜杠转义(含正则与 \n),
 // 否则会被模板字面量二次解释导致下发页面语法错误(曾因此整页 JS 失效)。
@@ -1301,6 +1729,7 @@ const HTML = `<!DOCTYPE html>
   .badge.ok { background:#e6f4ea; color:var(--ok); }
   .badge.err { background:#fdecea; color:var(--err); }
   .badge.run { background:#fff4e0; color:var(--warn); }
+  .badge.progress { background:#fff4e0; color:var(--warn); }
   .errtxt { color:var(--err); font-size:12px; max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .hint { font-size:12px; color:var(--muted); margin-top:8px; line-height:1.6; }
   .msg { padding:10px 14px; border-radius:8px; margin:10px 0; font-size:13px; display:none; }
@@ -1382,6 +1811,7 @@ const HTML = `<!DOCTYPE html>
     <div class="grow"></div>
     <button class="btn small secondary" onclick="selectVisible(false)">清空选择</button>
     <button class="btn" id="btnRun" onclick="doRun()">▶ 运行</button>
+    <button class="btn small secondary" id="btnSync" onclick="doSyncAll()" title="逐个账号经微软接口实测余额与任务完成度(轻量, 不开浏览器, 每号约 2 秒)">🔄 同步余额</button>
   </div>
 
   <div class="tblwrap">
@@ -1391,16 +1821,17 @@ const HTML = `<!DOCTYPE html>
         <th style="width:36px">#</th>
         <th>账号</th>
         <th class="num">余额</th>
-        <th class="num">今日获得</th>
+        <th class="num" title="微软余额接口口径: 当前余额 - 当日锚点余额。一次性奖励、微软侧积分调整都会如实计入">今日获得</th>
+        <th title="微软接口逐项实测(当日每日任务集 + 搜索计数器 + 打卡子任务); 点 🩺 体检或 🔄 同步余额 时更新。已完成 = 全部逐项通过">任务</th>
         <th style="width:76px">状态</th>
         <th style="width:112px">最近活动</th>
         <th>备注 / 错误</th>
         <th style="width:84px">操作</th>
       </tr></thead>
-      <tbody id="accRows"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
+      <tbody id="accRows"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
     </table>
   </div>
-  <div class="hint">余额为脚本最近一次成功运行时的已知值，打开页面即可见、无需等待运行；「今日获得」按天累计、跨天自动归零。勾选账号后点「运行」只跑选中的账号；不勾选则跑全部。</div>
+  <div class="hint">余额为脚本最近一次成功运行时的已知值，打开页面即可见、无需等待运行；「今日获得」按微软余额接口口径计算（当日余额 − 当日起点余额），一次性奖励与微软侧调整会如实计入，跨天自动归零。勾选账号后点「运行」只跑选中的账号；不勾选则跑全部。</div>
 
   <details class="history">
     <summary>📜 运行历史（最近 10 次）与调度</summary>
@@ -1555,10 +1986,15 @@ const HTML = `<!DOCTYPE html>
 
   <dialog id="logsModal">
     <h2>📜 运行日志 <span id="logsEmail" style="color:var(--ms-blue)"></span></h2>
+    <div class="toolbar" style="margin-bottom:8px">
+      <label class="sub">日期:</label>
+      <select id="logsDate" onchange="onLogsDateChange()" style="padding:6px 8px;border:1px solid var(--border);border-radius:8px;font-size:13px"><option value="">加载中…</option></select>
+      <span class="sub">历史按天读取脚本日志文件, 保留 7 天</span>
+    </div>
     <pre id="logsBox" style="background:#101418;color:#cde3d8;font-size:12px;line-height:1.5;padding:12px;border-radius:8px;max-height:60vh;overflow:auto;white-space:pre-wrap;word-break:break-all">加载中…</pre>
     <div class="toolbar" style="margin-top:10px">
       <button class="btn secondary" onclick="closeLogs()">关闭</button>
-      <span class="sub">每 3 秒自动刷新，保留最近 300 条（容器重建后清零）</span>
+      <span class="sub" id="logsHint">实时模式: 每 3 秒自动刷新(内存缓存最近 300 条)</span>
     </div>
   </dialog>
 
@@ -1566,7 +2002,7 @@ const HTML = `<!DOCTYPE html>
 </div>
 <script>
 'use strict';
-var API = { overview:'/api/overview', pushConfig:'/api/push-config', pushTest:'/api/push-test', start:'/api/start', stop:'/api/stop', loginCheck:'/api/login-check', loginCheckStatus:'/api/login-check/status', manualLogin:'/api/manual-login', manualLoginStatus:'/api/manual-login/status', manualLoginStop:'/api/manual-login/stop', accountsManage:'/api/accounts-manage', accountsPass:'/api/accounts-manage/password', capabilities:'/api/capabilities', schedule:'/api/capabilities/schedule', accountLogs:'/api/account-logs' };
+var API = { overview:'/api/overview', pushConfig:'/api/push-config', pushTest:'/api/push-test', start:'/api/start', stop:'/api/stop', loginCheck:'/api/login-check', loginCheckStatus:'/api/login-check/status', syncAll:'/api/sync-all', manualLogin:'/api/manual-login', manualLoginStatus:'/api/manual-login/status', manualLoginStop:'/api/manual-login/stop', accountsManage:'/api/accounts-manage', accountsPass:'/api/accounts-manage/password', capabilities:'/api/capabilities', schedule:'/api/capabilities/schedule', accountLogs:'/api/account-logs', accountLogDates:'/api/account-log-dates', accountHistory:'/api/account-history' };
 var selected = {};
 var selectionReady = false; // 首次拿到账号列表时默认全选, 之后尊重用户的选择
 var accountsCache = [];
@@ -1642,11 +2078,12 @@ function fmtNum(n) {
 }
 
 function badge(status, liveRunning) {
-  if (liveRunning) return '<span class="badge run">运行中</span>';
-  if (status === 'success') return '<span class="badge ok">完成</span>';
-  if (status === 'failed') return '<span class="badge err">失败</span>';
-  if (status === 'running') return '<span class="badge run">运行中</span>';
-  return '<span class="badge">待运行</span>';
+  if (liveRunning) return '<span class="badge run">进行中</span>';
+  if (status === 'running') return '<span class="badge run">进行中</span>';
+  if (status === 'done') return '<span class="badge ok">已完成</span>';
+  if (status === 'progress') return '<span class="badge progress">进行中</span>';
+  if (status === 'sync-pending') return '<span class="badge" title="该账号已运行完成, 任务完成度将在自动同步后显示(也可点 🩺 立即刷新)">已运行·待同步</span>';
+  return '<span class="badge">待开始</span>';
 }
 
 function renderOverview(d) {
@@ -1672,6 +2109,20 @@ function renderOverview(d) {
   $('sumBalance').textContent = fmtNum(sum.totalBalance);
   $('sumToday').textContent = '+' + fmtNum(sum.totalToday);
   $('todayLabel').textContent = d.today || '';
+
+  var sb = $('btnSync');
+  if (sb) {
+    var sy = d.sync;
+    if (sy && sy.status === 'running') {
+      sb.disabled = true;
+      sb.textContent = '🔄 同步中(' + sy.done + '/' + sy.total + ')';
+      sb.title = '正在同步: ' + (sy.current || '-') + '(自动触发于' + (sy.trigger === 'run-end' ? '运行结束后' : '手动') + ')';
+    } else {
+      sb.disabled = false;
+      sb.textContent = '🔄 同步余额';
+      sb.title = '逐个账号经微软接口实测余额与任务完成度(每号约 2 秒)' + (sy && sy.finishedAt ? ';上次' + (sy.status === 'aborted' ? '被运行中断' : '完成于') + ': ' + new Date(sy.finishedAt).toLocaleTimeString() : '');
+    }
+  }
 
   var ri = $('runInfo');
   if (running) {
@@ -1702,7 +2153,7 @@ function renderOverview(d) {
 
 function renderAccounts(now) {
   var box = $('accRows');
-  if (!accountsCache.length) { box.innerHTML = '<tr><td colspan="9" class="empty">暂无账号数据</td></tr>'; return; }
+  if (!accountsCache.length) { box.innerHTML = '<tr><td colspan="10" class="empty">暂无账号数据</td></tr>'; return; }
   var html = '';
   for (var i = 0; i < accountsCache.length; i++) {
     var a = accountsCache[i];
@@ -1713,7 +2164,22 @@ function renderAccounts(now) {
     var bal = (a.balance != null) ? fmtNum(a.balance) : '—';
     var balTs = a.balanceTs ? '<div class="ts">' + fmtAgo(a.balanceTs, now) + '更新</div>' : '';
     var today = '+' + fmtNum(a.todayCollected || 0);
+    if (a.bonusCollected > 0) {
+      today += '<div class="ts" title="脚本今日经「领取全部待领奖励」领取的一次性积分(已含在上方总数内)">含一次性奖励 ' + fmtNum(a.bonusCollected) + '</div>';
+    }
     var live = (a.liveCollected != null && isRunning) ? '<div class="ts">本次 +' + fmtNum(a.liveCollected) + '</div>' : '';
+    var tk = a.todayTasks;
+    var taskCell = '<span class="ts" title="今日还没有微软接口实测数据: 点 🩺 体检或 🔄 同步余额 获取">—</span>';
+    if (a.validity === 'no-session') taskCell = '<span class="ts" title="该账号尚未登录过, 没有可查询的会话">未登录</span>';
+    else if (a.tasksNA) taskCell = '<span class="ts" title="微软接口不返回该账号的任务明细(余额已实测同步), 状态按运行结果显示">余额已同步</span>';
+    if (tk) {
+      var dn = (tk.dailysetDone || 0) + (tk.searchDone || 0) + (tk.punchDone || 0);
+      var tt = (tk.dailysetTotal || 0) + (tk.searchTotal || 0) + (tk.punchTotal || 0);
+      var detail = '每日任务 ' + (tk.dailysetDone || 0) + '/' + (tk.dailysetTotal || 0)
+        + ' · 搜索 ' + (tk.searchDone || 0) + '/' + (tk.searchTotal || 0)
+        + ' · 打卡 ' + (tk.punchDone || 0) + '/' + (tk.punchTotal || 0);
+      taskCell = (tk.allDone ? '<span style="color:var(--ok)"' : '<span') + ' title="' + detail + '(微软接口逐项实测)">' + dn + '/' + tt + '</span>';
+    }
     var act = a.lastRunTs ? fmtTs(a.lastRunTs) + '<div class="ts">' + fmtAgo(a.lastRunTs, now) + '</div>' : '-';
     var err = a.lastError ? '<div class="errtxt" title="' + esc(a.lastError) + '">' + esc(a.lastError) + '</div>' : '';
     html += '<tr>'
@@ -1722,6 +2188,7 @@ function renderAccounts(now) {
       + '<td class="em">' + esc(a.email) + '</td>'
       + '<td class="num">' + bal + balTs + '</td>'
       + '<td class="num" style="color:var(--ok)">' + today + live + '</td>'
+      + '<td style="font-size:12px">' + taskCell + '</td>'
       + '<td>' + badge(a.status, liveRunning) + '</td>'
       + '<td style="font-size:12px">' + act + '</td>'
       + '<td>' + err + '</td>'
@@ -1915,6 +2382,17 @@ function checkNote(a) {
   if (r && r.loggedIn) return '<div class="ts" style="color:var(--ok)">🩺 正常' + (r.balance != null ? ' · ' + fmtNum(r.balance) + ' 分' : '') + '</div>';
   return '<div class="ts" style="color:var(--err)">🩺 未登录</div>';
 }
+function doSyncAll() {
+  if (!confirm('同步全部账号的余额与任务完成度?轻量接口实测, 每号约 2 秒。')) return;
+  fetch(API.syncAll, { method: 'POST' })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (d && d.error) { alert(d.error); return; }
+      scheduleRefresh();
+    })
+    .catch(function (e) { alert('触发失败: ' + e.message); });
+}
+
 function doCheck(index) {
   var email = '#' + index;
   for (var i = 0; i < accountsCache.length; i++) if (accountsCache[i].index === index) email = accountsCache[i].email;
@@ -2115,9 +2593,11 @@ function saveCap() {
     .catch(function (e) { showCapMsg('保存失败: ' + e.message, false); });
 }
 
-// ---- 每账号运行日志 ----
+// ---- 每账号运行日志(统一按天读文件; 今天=最新一天, 每 5 秒自动重读, 含正在运行的内容) ----
 var logsTimer = null;
 var logsTag = '';
+var logsViewDate = '';
+var logsNewestDate = '';
 function openLogs(index) {
   var a = null;
   for (var i = 0; i < accountsCache.length; i++) if (accountsCache[i].index === index) a = accountsCache[i];
@@ -2126,16 +2606,49 @@ function openLogs(index) {
   $('logsEmail').textContent = a.email;
   var dlg = $('logsModal');
   if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
-  pullLogs();
-  if (!logsTimer) logsTimer = setInterval(pullLogs, 3000);
+  fillLogDates(function () {
+    var sel = $('logsDate');
+    sel.value = logsNewestDate || (sel.options[0] ? sel.options[0].value : '');
+    onLogsDateChange();
+  });
+  if (!logsTimer) logsTimer = setInterval(function () {
+    if (logsViewDate && logsViewDate === logsNewestDate) loadAccountLog();
+  }, 5000);
 }
-function pullLogs() {
-  fetch(API.accountLogs + '?user=' + encodeURIComponent(logsTag))
+function fillLogDates(cb) {
+  fetch(API.accountLogDates)
     .then(function (r) { return r.json(); })
     .then(function (d) {
-      $('logsBox').textContent = (d.lines && d.lines.length) ? d.lines.join('\\n') : '暂无日志（该账号尚未在本容器生命周期内产生事件，或容器刚重建）';
+      var sel = $('logsDate');
+      var opts = '';
+      var dates = d.dates || [];
+      for (var i = 0; i < dates.length; i++) {
+        opts += '<option value="' + dates[i] + '">' + dates[i] + (i === 0 ? '(今天)' : '') + '</option>';
+      }
+      sel.innerHTML = opts;
+      logsNewestDate = dates[0] || '';
+      cb();
     })
-    .catch(function () {});
+    .catch(function () { cb(); });
+}
+function onLogsDateChange() {
+  var sel = $('logsDate');
+  logsViewDate = sel.value || (sel.options[0] ? sel.options[0].value : '');
+  loadAccountLog();
+}
+function loadAccountLog() {
+  if (!logsViewDate) {
+    $('logsBox').textContent = '暂无可用日志文件';
+    return;
+  }
+  if (logsViewDate === logsNewestDate) $('logsHint').textContent = '今天: 每 5 秒自动重新读取(包含正在运行的内容)';
+  else $('logsHint').textContent = '历史快照: ' + logsViewDate + '(不自动刷新)';
+  fetch(API.accountHistory + '?user=' + encodeURIComponent(logsTag) + '&date=' + logsViewDate)
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      $('logsBox').textContent = (d.lines && d.lines.length) ? d.lines.join('\\n') : '该日期没有此账号的日志(或当天未运行)';
+    })
+    .catch(function (e) { $('logsBox').textContent = '加载失败: ' + e.message; });
 }
 function closeLogs() {
   var dlg = $('logsModal');
@@ -2214,6 +2727,31 @@ scheduleRefresh();
 if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
 loadPushConfig();
 loadState();
+// 日志 user 标签(邮箱本地部分) -> 完整邮箱 映射: CLAIM 等消息体内不含邮箱的事件靠它归属账号
+for (const em of Object.keys(state.accounts)) registerTagEmail(em);
+// 启动清扫: 容器重启会杀死进行中的运行(RUN-END 事件丢失), 账号状态会卡在"运行中"。
+// 延迟 20s 并先确认没有真正在跑的运行(看板单独崩溃重启、运行仍在继续的场景), 再标记中断
+setTimeout(async () => {
+  try {
+    const p = await fetchJson('/points');
+    if (p && p.running) return;
+  } catch (e) { /* API 不可达时运行大概率也已死, 继续清扫 */ }
+  let n = 0;
+  for (const em of Object.keys(state.accounts)) {
+    const a = state.accounts[em];
+    if (a && a.lastStatus === 'running') {
+      a.lastStatus = 'failed';
+      a.lastError = '容器重启导致运行中断, 已得积分已入账, 可重新运行续做剩余任务';
+      n++;
+    }
+  }
+  if (n) {
+    log('INFO', `启动清扫: ${n} 个账号卡在"运行中", 已标记为运行中断`);
+    saveState();
+  }
+}, 20000);
+// 启动 60s 后补齐缺失的今日任务实测数据(运行中会自动跳过, 30 分钟周期重试)
+setTimeout(() => { try { taskSyncCatchup('startup'); } catch (e) { /* ignore */ } }, 60000);
 log('INFO', 'MS-Rewards dashboard 启动, 端口 ' + PORT + ' (内网无鉴权)');
 log('INFO', '容器 API: ' + API_BASE + (API_TOKEN ? ' (token 已加载)' : ' (⚠ 未读取到 token)'));
 
