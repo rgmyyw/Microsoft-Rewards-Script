@@ -1025,9 +1025,9 @@ function handleUpgrade(req, socket, head) {
   }
 }
 
-// ============ 账号管理(动态账号, config/accounts.extra.json) ============
+// ============ 账号管理(动态账号, config/accounts.json) ============
 // 与 fork 的动态账号源同文件: 添加/删除后, 下一次运行(cron 或手动)自动生效, 无需重建容器
-const EXTRA_ACCOUNTS_FILE = process.env.EXTRA_ACCOUNTS_FILE || path.join(CONFIG_DIR, '..', 'accounts.extra.json');
+const EXTRA_ACCOUNTS_FILE = process.env.EXTRA_ACCOUNTS_FILE || path.join(CONFIG_DIR, '..', 'accounts.json');
 
 function readExtraFile() {
   try {
@@ -1896,7 +1896,7 @@ const HTML = `<!DOCTYPE html>
 
   <dialog id="acctModal">
     <h2>👥 账号管理</h2>
-    <div class="hint">全部账号均可 🔑 改密与 🗑 删除，<b>下一次运行自动生效</b>（每日定时或手动触发均可），无需重启容器；删除的账号重新添加即可恢复。账号数据保存在 config 卷的 accounts.extra.json。新增账号首次运行需要自动登录，若遇微软身份验证卡点，用主表格对应行的 🔑 人工登录完成。</div>
+    <div class="hint">全部账号均可 🔑 改密与 🗑 删除，<b>下一次运行自动生效</b>（每日定时或手动触发均可），无需重启容器；删除的账号重新添加即可恢复。账号数据保存在 config 卷的 accounts.json。新增账号首次运行需要自动登录，若遇微软身份验证卡点，用主表格对应行的 🔑 人工登录完成。</div>
     <table class="hist" style="margin-bottom:14px">
       <thead><tr><th>账号</th><th>地区</th><th>2FA</th><th style="width:150px">操作</th></tr></thead>
       <tbody id="acctRows"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>

@@ -246,10 +246,10 @@ export function loadAccountsFromEnv(projectRoot) {
 }
 
 export function getExtraAccountsPath(projectRoot) {
-    return path.join(projectRoot, 'config', 'accounts.extra.json')
+    return path.join(projectRoot, 'config', 'accounts.json')
 }
 
-// 动态账号(看板"账号管理"维护, 免重启): config/accounts.extra.json
+// 动态账号(看板"账号管理"维护, 免重启): config/accounts.json
 export function readRawExtraAccounts(projectRoot) {
     const filePath = getExtraAccountsPath(projectRoot)
     try {

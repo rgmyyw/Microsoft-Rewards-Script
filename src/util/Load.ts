@@ -120,7 +120,7 @@ function getAccountIndexes(): string[] {
 }
 
 function loadExtraRemovedEmails(): string[] {
-    const filePath = path.join(getProjectRoot(), 'config', 'accounts.extra.json')
+    const filePath = path.join(getProjectRoot(), 'config', 'accounts.json')
     try {
         if (!fs.existsSync(filePath)) return []
         const parsed: unknown = JSON.parse(fs.readFileSync(filePath, 'utf-8'))
@@ -137,10 +137,10 @@ function loadExtraRemovedEmails(): string[] {
     }
 }
 
-// Dashboard-managed dynamic accounts (config/accounts.extra.json), picked up by
+// Dashboard-managed dynamic accounts (config/accounts.json), picked up by
 // every new run process without a container restart. Env accounts keep priority.
 function loadExtraAccounts(): Account[] {
-    const filePath = path.join(getProjectRoot(), 'config', 'accounts.extra.json')
+    const filePath = path.join(getProjectRoot(), 'config', 'accounts.json')
     try {
         if (!fs.existsSync(filePath)) return []
         const parsed: unknown = JSON.parse(fs.readFileSync(filePath, 'utf-8'))

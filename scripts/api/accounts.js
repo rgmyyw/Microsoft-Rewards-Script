@@ -16,7 +16,7 @@ function sanitizeProxyUrl(value) {
 }
 
 
-// 动态账号(看板"账号管理"维护): config/accounts.extra.json, 索引从 901 起,
+// 动态账号(看板"账号管理"维护): config/accounts.json, 索引从 901 起,
 // 运行/展示/单账号与排除运行都会无重启感知
 const apiProjectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const EXTRA_BASE_INDEX = 901
