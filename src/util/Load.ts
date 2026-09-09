@@ -192,11 +192,12 @@ export function loadAccounts(): Account[] {
 
         // Dashboard-managed extras act as an override layer: same email patches
         // the env account (e.g. password rotation), otherwise it is appended.
+        const extras = loadExtraAccounts()
         const removed = new Set(loadExtraRemovedEmails())
         const kept: Account[] = []
         for (const account of accounts) {
             if (removed.has(account.email.toLowerCase())) continue
-            const override = extras.find(e => e.removed !== true && e.email.toLowerCase() === account.email.toLowerCase())
+            const override = extras.find(e => e.email.toLowerCase() === account.email.toLowerCase())
             if (override) {
                 if (override.password) account.password = override.password
                 if (override.geoLocale) account.geoLocale = override.geoLocale
@@ -209,7 +210,6 @@ export function loadAccounts(): Account[] {
         accounts.length = 0
         accounts.push(...kept)
         for (const extra of extras) {
-            if (extra.removed === true) continue
             if (!accounts.some(a => a.email.toLowerCase() === extra.email.toLowerCase())) {
                 accounts.push(extra)
             }
