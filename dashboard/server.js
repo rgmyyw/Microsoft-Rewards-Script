@@ -649,8 +649,9 @@ setInterval(() => { try { taskSyncCatchup('periodic-30min'); } catch (e) { /* ig
 
 // ==== 任务未完成自动补跑(每日最多一次) ====
 // 数据同步完成后检测: 有实测数据的账号未全部通过, 或无明细账号当日积分低于阈值
-// → 只对未完成的账号自动发起一次补跑(其余账号加入排除列表)。北京时间 21 点后不发起。
+// → 只对未完成的账号自动发起一次补跑(其余账号加入排除列表)。仅北京时间 7~21 点之间发起(凌晨静默, AUTO_RETRY_FIRST_HOUR 可覆盖)。
 const AUTO_RETRY_MIN_POINTS = Number(process.env.AUTO_RETRY_MIN_POINTS || 50);
+const AUTO_RETRY_FIRST_HOUR = Number(process.env.AUTO_RETRY_FIRST_HOUR || 7);
 const AUTO_RETRY_LAST_HOUR = 21;
 const autoRetry = { lastDate: '', active: false };
 
@@ -669,6 +670,7 @@ function accountNeedsRetry(a, t) {
 async function maybeAutoRetryRun(trigger) {
   const t = todayStr();
   if (autoRetry.lastDate === t || autoRetry.active) return;
+  if (beijingHour() < AUTO_RETRY_FIRST_HOUR) return; // 凌晨静默: 当天首跑由 6:00-6:30 定时轮负责, 补跑 7 点后才兜底
   if (beijingHour() >= AUTO_RETRY_LAST_HOUR) return;
   const pts = await fetchJson('/points');
   if (pts && pts.running) return; // 有运行在进行, 不发起
