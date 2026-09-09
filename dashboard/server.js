@@ -1621,6 +1621,21 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, note: '密码已更新，下一次运行自动生效（覆盖层机制，固定账号亦适用）' });
     }
 
+    if (p === '/api/accounts-manage/geo' && req.method === 'POST') {
+      let body = {};
+      try { body = await readBody(req); } catch (e) { body = {}; }
+      const email = String(body.email || '').trim().toLowerCase();
+      const geoLocale = String(body.geoLocale || '').trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json(res, 400, { error: '邮箱格式不正确' });
+      if (geoLocale !== 'auto' && !/^[a-z]{2}(-[a-z]{2})?$/.test(geoLocale)) return json(res, 400, { error: '地区格式不正确，示例: cn / gb / us / auto' });
+      const list = readExtraFile();
+      const entry = list.find((e) => String(e.email || '').toLowerCase() === email);
+      if (entry) entry.geoLocale = geoLocale;
+      else list.push({ email, geoLocale, langCode: 'en' });
+      if (!writeExtraFile(list)) return json(res, 500, { error: '写入失败' });
+      return json(res, 200, { ok: true, geoLocale, note: '地区已更新，下一次运行自动生效' });
+    }
+
     // ---- 前端页面 ----
     if (p === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -1896,7 +1911,7 @@ const HTML = `<!DOCTYPE html>
 
   <dialog id="acctModal">
     <h2>👥 账号管理</h2>
-    <div class="hint">全部账号均可 🔑 改密与 🗑 删除，<b>下一次运行自动生效</b>（每日定时或手动触发均可），无需重启容器；删除的账号重新添加即可恢复。账号数据保存在 config 卷的 accounts.json。新增账号首次运行需要自动登录，若遇微软身份验证卡点，用主表格对应行的 🔑 人工登录完成。</div>
+    <div class="hint">全部账号均可 🌏 改地区、🔑 改密与 🗑 删除，<b>下一次运行自动生效</b>（每日定时或手动触发均可），无需重启容器；删除的账号重新添加即可恢复。账号数据保存在 config 卷的 accounts.json。新增账号首次运行需要自动登录，若遇微软身份验证卡点，用主表格对应行的 🔑 人工登录完成。</div>
     <table class="hist" style="margin-bottom:14px">
       <thead><tr><th>账号</th><th>地区</th><th>2FA</th><th style="width:150px">操作</th></tr></thead>
       <tbody id="acctRows"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
@@ -2004,7 +2019,7 @@ const HTML = `<!DOCTYPE html>
 </div>
 <script>
 'use strict';
-var API = { overview:'/api/overview', pushConfig:'/api/push-config', pushTest:'/api/push-test', start:'/api/start', stop:'/api/stop', loginCheck:'/api/login-check', loginCheckStatus:'/api/login-check/status', syncAll:'/api/sync-all', manualLogin:'/api/manual-login', manualLoginStatus:'/api/manual-login/status', manualLoginStop:'/api/manual-login/stop', accountsManage:'/api/accounts-manage', accountsPass:'/api/accounts-manage/password', capabilities:'/api/capabilities', schedule:'/api/capabilities/schedule', accountLogs:'/api/account-logs', accountLogDates:'/api/account-log-dates', accountHistory:'/api/account-history' };
+var API = { overview:'/api/overview', pushConfig:'/api/push-config', pushTest:'/api/push-test', start:'/api/start', stop:'/api/stop', loginCheck:'/api/login-check', loginCheckStatus:'/api/login-check/status', syncAll:'/api/sync-all', manualLogin:'/api/manual-login', manualLoginStatus:'/api/manual-login/status', manualLoginStop:'/api/manual-login/stop', accountsManage:'/api/accounts-manage', accountsPass:'/api/accounts-manage/password', accountsGeo:'/api/accounts-manage/geo', capabilities:'/api/capabilities', schedule:'/api/capabilities/schedule', accountLogs:'/api/account-logs', accountLogDates:'/api/account-log-dates', accountHistory:'/api/account-history' };
 var selected = {};
 var selectionReady = false; // 首次拿到账号列表时默认全选, 之后尊重用户的选择
 var accountsCache = [];
@@ -2485,6 +2500,15 @@ function renderAcctManage(d) {
   var fileAccounts = d.accounts || [];
   var all = accountsCache.slice();
   acctManageRows = all;
+  var fileByEmail = {};
+  for (var i = 0; i < fileAccounts.length; i++) fileByEmail[String(fileAccounts[i].email || '').toLowerCase()] = fileAccounts[i];
+  for (var i = 0; i < all.length; i++) {
+    var fe = fileByEmail[String(all[i].email || '').toLowerCase()];
+    if (fe) {
+      if (!all[i].geoLocale) all[i].geoLocale = fe.geoLocale;
+      if (fe.hasTotp) all[i].hasTotp = true;
+    }
+  }
   for (var i = 0; i < fileAccounts.length; i++) {
     var fa = fileAccounts[i];
     var exists = false;
@@ -2496,6 +2520,7 @@ function renderAcctManage(d) {
   for (var k = 0; k < all.length; k++) {
     var a = all[k];
     var del = '<button class="btn small secondary" title="修改微软账号密码，下一次运行生效" onclick="changePass(' + k + ')">🔑 改密</button> '
+      + '<button class="btn small secondary" title="修改地区(搜索市场/语言)，下一次运行生效" onclick="changeGeo(' + k + ')">🌍 地区</button> '
       + '<button class="btn small danger" title="删除账号，下一次运行生效" onclick="delAccount(' + k + ')">🗑 删除</button>';
     var totp = a.hasTotp ? '是' : '-';
     var geo = a.geoLocale || '-';
@@ -2668,6 +2693,25 @@ function changePass(k) {
     .then(function (r) { return r.json(); })
     .then(function (d) {
       if (d && d.ok) alert('✅ 密码已更新，下一次运行自动生效');
+      else alert((d && d.error) || '失败');
+    })
+    .catch(function (e) { alert('失败: ' + e.message); });
+}
+
+// ---- 账号改地区(覆盖层) ----
+function changeGeo(k) {
+  var a = acctManageRows[k];
+  if (!a) return;
+  var cur = a.geoLocale || 'cn';
+  var v = prompt('为 ' + a.email + ' 设置新的地区代码（如 cn / gb / us / jp / auto）：', cur);
+  if (v == null) return;
+  v = String(v).trim().toLowerCase();
+  if (!v) { alert('地区不能为空'); return; }
+  if (v !== 'auto' && !/^[a-z]{2}(-[a-z]{2})?$/.test(v)) { alert('地区格式不正确，示例: cn / gb / us / auto'); return; }
+  fetch(API.accountsGeo, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: a.email, geoLocale: v }) })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (d && d.ok) alert('✅ 地区已更新为 ' + v + '，下一次运行自动生效');
       else alert((d && d.error) || '失败');
     })
     .catch(function (e) { alert('失败: ' + e.message); });
