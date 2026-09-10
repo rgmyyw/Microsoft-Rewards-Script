@@ -133,9 +133,31 @@ while (Date.now() < deadline) {
 }
 
 console.error(`[trigger] Timed out after ${configuredTimeoutHours}h waiting for run to finish.`)
+// 先优雅停止（SIGTERM，让浏览器会话/cookie 完成检查点保存），超时未退再强杀
+try {
+    await request('POST', '/stop')
+    console.error('[trigger] Requested a graceful stop for the timed-out run.')
+} catch (err) {
+    console.error(`[trigger] Could not request a graceful stop: ${err.message}`)
+}
+
+const gracefulDeadline = Date.now() + 60_000
+while (Date.now() < gracefulDeadline) {
+    await sleep(POLL_MS)
+    try {
+        const { body: s } = await request('GET', '/status')
+        if (s?.state === 'idle') {
+            console.error('[trigger] Run stopped gracefully after timeout.')
+            process.exit(1)
+        }
+    } catch {
+        /* momentary blip - keep polling */
+    }
+}
+
 try {
     await request('POST', '/stop', { force: true })
-    console.error('[trigger] Requested a forced stop for the timed-out run.')
+    console.error('[trigger] Run did not exit gracefully in time; requested a forced stop.')
 } catch (err) {
     console.error(`[trigger] Could not request a forced stop: ${err.message}`)
 }
