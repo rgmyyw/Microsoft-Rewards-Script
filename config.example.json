@@ -11,6 +11,14 @@
         "min": "1min",
         "max": "3min"
     },
+    "failedAccountRetry": {
+        "enabled": true,
+        "maxPasses": 1,
+        "cooldown": {
+            "min": "3min",
+            "max": "8min"
+        }
+    },
     "workers": {
         "doDailySet": true,
         "doClaimBonusPoints": true,

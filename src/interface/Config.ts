@@ -8,6 +8,7 @@ export interface Config {
     contintueOnBotWarning: boolean
     skipNonPointTasks: boolean
     accountDelay: ConfigDelay
+    failedAccountRetry: ConfigFailedAccountRetry
     workers: ConfigWorkers
     activities: ConfigActivities
     searchOnBingLocalQueries: boolean
@@ -48,6 +49,16 @@ export interface ConfigSearchSettings {
 export interface ConfigDelay {
     min: number | string
     max: number | string
+}
+
+/**
+ * 全部账户跑完后对失败账户的兜底补跑。
+ * cooldown 为补跑前的等待时间（给微软侧瞬时限流留恢复窗口）。
+ */
+export interface ConfigFailedAccountRetry {
+    enabled: boolean
+    maxPasses: number
+    cooldown: ConfigDelay
 }
 
 export interface ConfigExperimental {

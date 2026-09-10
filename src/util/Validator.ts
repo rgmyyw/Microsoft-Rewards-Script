@@ -126,6 +126,13 @@ export const ConfigSchema = z.object({
     contintueOnBotWarning: z.boolean().default(false),
     skipNonPointTasks: z.boolean().default(true),
     accountDelay: DelaySchema.default({ min: '1min', max: '3min' }),
+    failedAccountRetry: z
+        .object({
+            enabled: z.boolean().default(true),
+            maxPasses: z.number().int().min(0).max(3).default(1),
+            cooldown: DelaySchema.default({ min: '3min', max: '8min' })
+        })
+        .default({ enabled: true, maxPasses: 1, cooldown: { min: '3min', max: '8min' } }),
     workers: z.object({
         doDailySet: z.boolean(),
         doMorePromotions: z.boolean(),
@@ -275,6 +282,11 @@ const defaultConfig: Config = {
     contintueOnBotWarning: false,
     skipNonPointTasks: true,
     accountDelay: { min: '1min', max: '3min' },
+    failedAccountRetry: {
+        enabled: true,
+        maxPasses: 1,
+        cooldown: { min: '3min', max: '8min' }
+    },
     workers: {
         doDailySet: true,
         doMorePromotions: true,

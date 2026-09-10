@@ -52,6 +52,7 @@ interface AccountStats {
     duration: number
     success: boolean
     error?: string
+    botWarningSkip?: boolean
 }
 
 interface AccountRunResult {
@@ -491,111 +492,10 @@ export class MicrosoftRewardsBot {
                 await this.waitBeforeNextAccount(account.email)
             }
 
-            const accountStartTime = Date.now()
-            const accountEmail = account.email
-            this.userData.userName = this.utils.getEmailUsername(accountEmail)
-            this.userData.timezoneOffset = String(new Date().getTimezoneOffset())
-
-            try {
-                const cachedRegion =
-                    account.geoLocale === 'auto' ? loadResolvedRegion(this.config.sessionPath, accountEmail) : undefined
-                this.accountLocale = resolveAccountLocale(account, cachedRegion)
-                this.userData.langCode = this.accountLocale.language
-                this.userData.geoLocale = this.accountLocale.country ?? 'US'
-
-                this.logger.info(
-                    'main',
-                    'ACCOUNT-START',
-                    `开始处理账户: ${accountEmail} | geoLocale: ${account.geoLocale} | locale: ${this.accountLocale.locale}${
-                        cachedRegion ? ` | 缓存区域: ${cachedRegion}` : ''
-                    }`
-                )
-
-                this.http = new HttpClient(account.proxy, {
-                    'Accept-Language': this.accountLocale.acceptLanguage
-                })
-
-                let flowError: string | undefined
-                const result: AccountRunResult | undefined = await this.Main(account).catch(error => {
-                    flowError = error instanceof Error ? error.message : String(error)
-                    void this.logger.error(true, 'FLOW', `${accountEmail} 的移动端流程失败: ${flowError}`)
-                    return undefined
-                })
-
-                const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
-
-                if (result) {
-                    const collectedPoints = result.collectedPoints ?? 0
-                    const accountInitialPoints = result.initialPoints ?? 0
-                    const accountFinalPoints = accountInitialPoints + collectedPoints
-
-                    if (result.skippedForBotWarning) {
-                        accountStats.push({
-                            email: accountEmail,
-                            initialPoints: accountInitialPoints,
-                            finalPoints: accountInitialPoints,
-                            collectedPoints: 0,
-                            duration: parseFloat(durationSeconds),
-                            success: false,
-                            error: 'Microsoft bot-score warning detected'
-                        })
-
-                        this.logger.warn(
-                            'main',
-                            'ACCOUNT-SKIP',
-                            `跳过账户: ${accountEmail} | 原因=Fraud_UserWarning_BotScore_UX | 持续秒数=${durationSeconds}`
-                        )
-                    } else {
-                        accountStats.push({
-                            email: accountEmail,
-                            initialPoints: accountInitialPoints,
-                            finalPoints: accountFinalPoints,
-                            collectedPoints: collectedPoints,
-                            duration: parseFloat(durationSeconds),
-                            success: true
-                        })
-
-                        this.logger.info(
-                            'main',
-                            'ACCOUNT-END',
-                            `账户完成: ${accountEmail} | 获得积分=${collectedPoints} | 原余额=${accountInitialPoints} | 现余额=${accountFinalPoints} | 持续秒数=${durationSeconds}`,
-                            'green'
-                        )
-                    }
-                } else {
-                    const errorDetail = flowError && flowError !== 'undefined'
-                        ? flowError.replace(/\r?\n/g, ' ').slice(0, 120)
-                        : '流程失败（未捕获到错误详情）'
-
-                    accountStats.push({
-                        email: accountEmail,
-                        initialPoints: 0,
-                        finalPoints: 0,
-                        collectedPoints: 0,
-                        duration: parseFloat(durationSeconds),
-                        success: false,
-                        error: errorDetail
-                    })
-                }
-            } catch (error) {
-                const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
-                this.logger.error(
-                    'main',
-                    'ACCOUNT-ERROR',
-                    `${accountEmail} | 错误=${error instanceof Error ? error.message : String(error)}`
-                )
-
-                accountStats.push({
-                    email: accountEmail,
-                    initialPoints: 0,
-                    finalPoints: 0,
-                    collectedPoints: 0,
-                    duration: parseFloat(durationSeconds),
-                    success: false,
-                    error: error instanceof Error ? error.message : String(error)
-                })
-            }
+            accountStats.push(await this.processAccount(account))
         }
+
+        await this.retryFailedAccounts(accounts, accountStats)
 
         if (this.config.clusters <= 1 && cluster.isPrimary) {
             const totalCollectedPoints = accountStats.reduce((sum, s) => sum + s.collectedPoints, 0)
@@ -618,6 +518,200 @@ export class MicrosoftRewardsBot {
         }
 
         return accountStats
+    }
+
+    private async processAccount(account: Account): Promise<AccountStats> {
+        const accountStartTime = Date.now()
+        const accountEmail = account.email
+        this.userData.userName = this.utils.getEmailUsername(accountEmail)
+        this.userData.timezoneOffset = String(new Date().getTimezoneOffset())
+
+        try {
+            const cachedRegion =
+                account.geoLocale === 'auto' ? loadResolvedRegion(this.config.sessionPath, accountEmail) : undefined
+            this.accountLocale = resolveAccountLocale(account, cachedRegion)
+            this.userData.langCode = this.accountLocale.language
+            this.userData.geoLocale = this.accountLocale.country ?? 'US'
+
+            this.logger.info(
+                'main',
+                'ACCOUNT-START',
+                `开始处理账户: ${accountEmail} | geoLocale: ${account.geoLocale} | locale: ${this.accountLocale.locale}${
+                    cachedRegion ? ` | 缓存区域: ${cachedRegion}` : ''
+                }`
+            )
+
+            this.http = new HttpClient(account.proxy, {
+                'Accept-Language': this.accountLocale.acceptLanguage
+            })
+
+            let flowError: string | undefined
+            const result: AccountRunResult | undefined = await this.Main(account).catch(error => {
+                flowError = error instanceof Error ? error.message : String(error)
+                void this.logger.error(true, 'FLOW', `${accountEmail} 的移动端流程失败: ${flowError}`)
+                return undefined
+            })
+
+            const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
+
+            if (result) {
+                const collectedPoints = result.collectedPoints ?? 0
+                const accountInitialPoints = result.initialPoints ?? 0
+                const accountFinalPoints = accountInitialPoints + collectedPoints
+
+                if (result.skippedForBotWarning) {
+                    this.logger.warn(
+                        'main',
+                        'ACCOUNT-SKIP',
+                        `跳过账户: ${accountEmail} | 原因=Fraud_UserWarning_BotScore_UX | 持续秒数=${durationSeconds}`
+                    )
+
+                    return {
+                        email: accountEmail,
+                        initialPoints: accountInitialPoints,
+                        finalPoints: accountInitialPoints,
+                        collectedPoints: 0,
+                        duration: parseFloat(durationSeconds),
+                        success: false,
+                        error: 'Microsoft bot-score warning detected',
+                        botWarningSkip: true
+                    }
+                }
+
+                this.logger.info(
+                    'main',
+                    'ACCOUNT-END',
+                    `账户完成: ${accountEmail} | 获得积分=${collectedPoints} | 原余额=${accountInitialPoints} | 现余额=${accountFinalPoints} | 持续秒数=${durationSeconds}`,
+                    'green'
+                )
+
+                return {
+                    email: accountEmail,
+                    initialPoints: accountInitialPoints,
+                    finalPoints: accountFinalPoints,
+                    collectedPoints: collectedPoints,
+                    duration: parseFloat(durationSeconds),
+                    success: true
+                }
+            }
+
+            const errorDetail = flowError && flowError !== 'undefined'
+                ? flowError.replace(/\r?\n/g, ' ').slice(0, 120)
+                : '流程失败（未捕获到错误详情）'
+
+            return {
+                email: accountEmail,
+                initialPoints: 0,
+                finalPoints: 0,
+                collectedPoints: 0,
+                duration: parseFloat(durationSeconds),
+                success: false,
+                error: errorDetail
+            }
+        } catch (error) {
+            const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
+            this.logger.error(
+                'main',
+                'ACCOUNT-ERROR',
+                `${accountEmail} | 错误=${error instanceof Error ? error.message : String(error)}`
+            )
+
+            return {
+                email: accountEmail,
+                initialPoints: 0,
+                finalPoints: 0,
+                collectedPoints: 0,
+                duration: parseFloat(durationSeconds),
+                success: false,
+                error: error instanceof Error ? error.message : String(error)
+            }
+        }
+    }
+
+    /**
+     * 兜底补跑：全部账户跑完后统计未成功账户，冷却一段时间（给微软侧瞬时限流/超时
+     * 留恢复窗口）后重跑一遍，结果覆盖原统计。机器人评分警告跳过的账户不补跑
+     * （重试无意义且可能加重风控）。
+     */
+    private async retryFailedAccounts(allAccounts: Account[], stats: AccountStats[]): Promise<void> {
+        const retryConfig = this.config.failedAccountRetry
+        if (!retryConfig?.enabled || (retryConfig.maxPasses ?? 0) < 1) {
+            return
+        }
+
+        const accountByEmail = new Map(allAccounts.map(account => [account.email, account]))
+
+        for (let pass = 1; pass <= retryConfig.maxPasses; pass++) {
+            const targets = stats
+                .filter(stat => !stat.success && !stat.botWarningSkip)
+                .map(stat => accountByEmail.get(stat.email))
+                .filter((account): account is Account => Boolean(account))
+
+            if (targets.length === 0) {
+                return
+            }
+
+            this.logger.warn(
+                'main',
+                'RETRY-PASS',
+                `本轮结束探测到 ${targets.length} 个未成功账户，开始第 ${pass}/${retryConfig.maxPasses} 轮补跑: ${targets
+                    .map(account => account.email)
+                    .join(', ')}`
+            )
+
+            await this.waitRetryCooldown(retryConfig.cooldown)
+
+            for (const [targetIndex, account] of targets.entries()) {
+                if (targetIndex > 0) {
+                    await this.waitBeforeNextAccount(account.email)
+                }
+
+                const stat = await this.processAccount(account)
+                const index = stats.findIndex(s => s.email === account.email)
+                if (index >= 0) {
+                    stats[index] = stat
+                }
+
+                if (stat.success) {
+                    this.logger.info(
+                        'main',
+                        'RETRY-PASS',
+                        `补跑成功: ${account.email} | 获得积分=${stat.collectedPoints} | 原余额=${stat.initialPoints} | 现余额=${stat.finalPoints}`,
+                        'green'
+                    )
+                } else {
+                    this.logger.warn(
+                        'main',
+                        'RETRY-PASS',
+                        `补跑仍未成功: ${account.email} | ${stat.error ?? '未知错误'}`
+                    )
+                }
+            }
+        }
+
+        const stillFailed = stats.filter(stat => !stat.success && !stat.botWarningSkip)
+        if (stillFailed.length > 0) {
+            this.logger.error(
+                'main',
+                'RETRY-PASS',
+                `补跑结束，仍有 ${stillFailed.length} 个账户未成功: ${stillFailed.map(stat => stat.email).join(', ')}`
+            )
+        } else {
+            this.logger.info('main', 'RETRY-PASS', '补跑结束，全部账户均已成功', 'green')
+        }
+    }
+
+    private async waitRetryCooldown(delay: { min: number | string; max: number | string }): Promise<void> {
+        const minMs = typeof delay.min === 'number' ? delay.min : this.utils.stringToNumber(delay.min)
+        const maxMs = typeof delay.max === 'number' ? delay.max : this.utils.stringToNumber(delay.max)
+
+        if (minMs < 0 || maxMs < 0 || maxMs < minMs) {
+            throw new Error('failedAccountRetry.cooldown must use non-negative values with max >= min')
+        }
+
+        const delayMs = this.utils.randomNumber(Math.ceil(minMs), Math.floor(maxMs))
+        this.logger.info('main', 'RETRY-PASS', `补跑冷却，等待 ${(delayMs / 1000).toFixed(1)} 秒`)
+        await this.utils.wait(delayMs)
     }
 
     private async waitBeforeNextAccount(nextEmail?: string): Promise<void> {
