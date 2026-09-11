@@ -1747,7 +1747,8 @@ const HTML = `<!DOCTYPE html>
   .badge.err { background:#fdecea; color:var(--err); }
   .badge.run { background:#fff4e0; color:var(--warn); }
   .badge.progress { background:#fff4e0; color:var(--warn); }
-  .errtxt { color:var(--err); font-size:12px; max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .errbadge { display:inline-block; color:var(--err); border:1px solid var(--err); border-radius:999px; font-size:12px; line-height:1.6; padding:0 9px; cursor:pointer; white-space:nowrap; user-select:none; }
+  .errbadge:hover { background:rgba(220,80,80,.12); }
   .hint { font-size:12px; color:var(--muted); margin-top:8px; line-height:1.6; }
   .msg { padding:10px 14px; border-radius:8px; margin:10px 0; font-size:13px; display:none; }
   .msg.show { display:block; }
@@ -2015,6 +2016,16 @@ const HTML = `<!DOCTYPE html>
     </div>
   </dialog>
 
+  <dialog id="errModal">
+    <h2>⚠ 错误详情 <span id="errEmail" style="color:var(--ms-blue)"></span></h2>
+    <div class="sub" id="errTime" style="margin-bottom:8px"></div>
+    <pre id="errBox" style="background:#101418;color:#ffb4b4;font-size:12px;line-height:1.5;padding:12px;border-radius:8px;max-height:55vh;overflow:auto;white-space:pre-wrap;word-break:break-all"></pre>
+    <div class="toolbar" style="margin-top:10px">
+      <button class="btn secondary" onclick="closeErrModal()">关闭</button>
+      <span class="sub">来自最近一次运行/体检的失败信息, 重跑成功后自动清除</span>
+    </div>
+  </dialog>
+
   <div class="foot">数据来源: microsoft-rewards-script 容器 API · <span id="footRefresh">每 15 秒自动刷新</span> · ms-rewards-dashboard</div>
 </div>
 <script>
@@ -2198,7 +2209,7 @@ function renderAccounts(now) {
       taskCell = (tk.allDone ? '<span style="color:var(--ok)"' : '<span') + ' title="' + detail + '(微软接口逐项实测)">' + dn + '/' + tt + '</span>';
     }
     var act = a.lastRunTs ? fmtTs(a.lastRunTs) + '<div class="ts">' + fmtAgo(a.lastRunTs, now) + '</div>' : '-';
-    var err = a.lastError ? '<div class="errtxt" title="' + esc(a.lastError) + '">' + esc(a.lastError) + '</div>' : '';
+    var err = a.lastError ? '<span class="errbadge" title="' + esc(a.lastError) + '" onclick="showErrorModal(' + a.index + ')">⚠ 错误</span>' : '<span class="ts" title="最近一次运行无错误">—</span>';
     html += '<tr>'
       + '<td><input type="checkbox"' + checked + ' onchange="toggleSel(' + a.index + ', this.checked)"></td>'
       + '<td>' + rowNo + '</td>'
@@ -2642,6 +2653,18 @@ function openLogs(index) {
     if (logsViewDate && logsViewDate === logsNewestDate) loadAccountLog();
   }, 5000);
 }
+function showErrorModal(index) {
+  var a = null;
+  for (var i = 0; i < accountsCache.length; i++) if (accountsCache[i].index === index) a = accountsCache[i];
+  if (!a || !a.lastError) return;
+  $('errEmail').textContent = a.email;
+  $('errTime').textContent = a.lastRunTs ? '最近运行: ' + fmtTs(a.lastRunTs) + '(' + fmtAgo(a.lastRunTs, Date.now()) + ')' : '';
+  $('errBox').textContent = a.lastError;
+  var dlg = $('errModal');
+  if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
+}
+function closeErrModal() { $('errModal').close(); }
+
 function fillLogDates(cb) {
   fetch(API.accountLogDates)
     .then(function (r) { return r.json(); })
