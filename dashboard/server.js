@@ -156,7 +156,9 @@ function ensureAccount(email) {
 // 维护"当日余额锚点"(dayStartDate/dayStartBalance), "今日获得"优先按微软余额接口口径
 // = 当前余额 - 当日锚点, 微软侧的一次性奖励/回收/调整都会如实反映, 不再依赖日志逐笔累计
 function recordBalance(a, balance) {
-  if (balance == null || typeof balance !== 'number' || !(balance >= 0)) return;
+  // 非正余额一律拒收: flyout 兜底接口对未登录视角会返回 200+0 分(2026-09-19 实测),
+  // 一旦落库会把次日"当日起点余额"毒化为 0, "今日获得"变成全部余额
+  if (balance == null || typeof balance !== 'number' || !(balance > 0)) return;
   const t = todayStr();
   if (a.dayStartDate !== t) {
     // 跨天(或首次观测): 用今天之前最后一次已知余额作当日锚点; 没有历史则用本次观测值
@@ -1746,7 +1748,7 @@ const HTML = `<!DOCTYPE html>
   .badge.ok { background:#e6f4ea; color:var(--ok); }
   .badge.err { background:#fdecea; color:var(--err); }
   .badge.run { background:#fff4e0; color:var(--warn); }
-  .badge.progress { background:#fff4e0; color:var(--warn); }
+  .badge.progress { background:#e5f1fb; color:var(--ms-blue); }
   .errbadge { display:inline-block; color:var(--err); border:1px solid var(--err); border-radius:999px; font-size:12px; line-height:1.6; padding:0 9px; cursor:pointer; white-space:nowrap; user-select:none; }
   .errbadge:hover { background:rgba(220,80,80,.12); }
   .hint { font-size:12px; color:var(--muted); margin-top:8px; line-height:1.6; }
@@ -2106,10 +2108,10 @@ function fmtNum(n) {
 }
 
 function badge(status, liveRunning) {
-  if (liveRunning) return '<span class="badge run">进行中</span>';
-  if (status === 'running') return '<span class="badge run">进行中</span>';
+  if (liveRunning) return '<span class="badge run">运行中</span>';
+  if (status === 'running') return '<span class="badge run">运行中</span>';
   if (status === 'done') return '<span class="badge ok">已完成</span>';
-  if (status === 'progress') return '<span class="badge progress">进行中</span>';
+  if (status === 'progress') return '<span class="badge progress" title="脚本并未在跑该账号: 任务体检显示部分完成(未全部通过), 点 🩺 可复查">部分完成</span>';
   if (status === 'sync-pending') return '<span class="badge" title="该账号已运行完成, 任务完成度将在自动同步后显示(也可点 🩺 立即刷新)">已运行·待同步</span>';
   return '<span class="badge">待开始</span>';
 }
