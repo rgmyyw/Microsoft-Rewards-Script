@@ -448,6 +448,13 @@ function handleFrame(frame) {
   try { data = JSON.parse(datas.join('\n')); } catch (e) { return; }
 
   if (event === 'log') {
+    // SSE 每次重连都会按 replay 参数整段重放最近事件(容器 API 行为): 按 id 跳过已消费的,
+    // 否则 ACCOUNT-END 等被重复处理, 产生幻影运行记录/今日获得翻倍(2026-09-20 修复)。
+    // logSeq 与容器同生命周期从 0 递增, 看板随容器启停, 内存水位即够, 无需持久化
+    if (data.id != null) {
+      if (lastLogId != null && data.id <= lastLogId) return;
+      lastLogId = data.id;
+    }
     pushForEntry(data);
     recordEntry(data);
     pushAccountLog(data);
@@ -457,6 +464,8 @@ function handleFrame(frame) {
     // 状态变化, 页面通过轮询 /points 反映, 此处无需处理
   }
 }
+
+let lastLogId = null;
 
 function connectSSE() {
   if (!API_TOKEN) {
@@ -2156,10 +2165,18 @@ function renderOverview(d) {
 
   var ri = $('runInfo');
   if (running) {
-    ri.innerHTML = '正在跑: ' + esc(run.currentAccount || '-') + '<br>本次已获得 +' + fmtNum(run.collected);
+    // 当前账号实时得分与整轮累计分开显示, 避免把整轮合计误读成正在跑的账号的得分
+    var curAcc = null;
+    for (var ci = 0; ci < accountsCache.length; ci++) if (accountsCache[ci].email === run.currentAccount) { curAcc = accountsCache[ci]; break; }
+    var curGain = (curAcc && curAcc.liveCollected != null) ? curAcc.liveCollected : null;
+    ri.innerHTML = '正在跑: ' + esc(run.currentAccount || '-') +
+      (curGain != null ? '（本号 +' + fmtNum(curGain) + '）' : '') +
+      '<br>本轮合计 +' + fmtNum(run.collected);
     var bits = [];
-    if (run.startedAt) {
-      var elMin = Math.max(0, Math.round(((d.serverTime || Date.now()) - run.startedAt) / 60000));
+    // 容器 API 的 startedAt 是 ISO 字符串, 必须经 Date.parse, 直接数字相减会得 NaN
+    var runStartTs = Date.parse(run.startedAt);
+    if (!isNaN(runStartTs)) {
+      var elMin = Math.max(0, Math.round((now - runStartTs) / 60000));
       bits.push('已运行 ' + fmtDur(elMin));
     }
     var eta = d.eta;
