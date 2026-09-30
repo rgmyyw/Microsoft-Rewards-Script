@@ -134,7 +134,9 @@ if [ "${API_MODE:-false}" = "true" ]; then
     echo "[entrypoint] Starting dashboard on ${DASHBOARD_PORT:-8300} (data: $DASHBOARD_DATA_DIR)"
     (
       while true; do
-        node "$SCRIPT_DIR/dashboard/server.js"
+        # || true: entrypoint 开启了 set -e, 看板进程被 kill 或崩溃(非零退出)会
+        # 触发 errexit 连带杀死本守护循环, 导致看板死后无人重启
+        node "$SCRIPT_DIR/dashboard/server.js" || true
         echo "[entrypoint] dashboard exited, restarting in 5s" >&2
         sleep 5
       done
