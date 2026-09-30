@@ -157,9 +157,28 @@ async function fetchWithCookie(url, cookieHeader, headers, referer, { manualRedi
     }
 }
 
+// 只取状态码(主接口对被封号 403、对受限会话 302→Signin、对认可会话 200)
+async function fetchStatus(url, cookieHeader, headers, referer) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 15000)
+    try {
+        const res = await fetch(url, {
+            headers: { ...headers, Cookie: cookieHeader, Accept: 'application/json, text/plain, */*', Referer: referer },
+            redirect: 'manual',
+            signal: controller.signal
+        })
+        clearTimeout(timer)
+        return res.status
+    } catch {
+        clearTimeout(timer)
+        return null
+    }
+}
+
 // HTTP 直连部分: 档案国家(getuserinfo, 多数账号被拒)+ 当前服务区域(flyout, 全账号可得)
+// + 封禁状态(主接口状态码 + isRewardsUser 字段)
 async function probeHttp(cookieHeader, fpHeaders) {
-    const out = { profile: null, service: null }
+    const out = { profile: null, service: null, banned: null }
     const userInfo = await fetchWithCookie(USER_INFO_URL, cookieHeader, {
         ...fpHeaders,
         Origin: 'https://rewards.bing.com'
@@ -169,10 +188,32 @@ async function probeHttp(cookieHeader, fpHeaders) {
     const flyout = await fetchWithCookie(FLYOUT_URL, cookieHeader, fpHeaders, 'https://www.bing.com/', { manualRedirect: false })
     const sc = flyout?.userInfo?.rewardsCountry ?? flyout?.userInfo?.autoRedeemProfile?.country
     if (typeof sc === 'string' && /^[a-z]{2}$/i.test(sc)) out.service = sc.toLowerCase()
+    // isRewardsUser=false = 积分商城资格被暂停(封禁); 可信源仅两处, flyout 不算:
+    //   - flyout 对直连 fetch 一律 errorCode=5 + balance=0 的"未认可视角"(2026-09-30
+    //     实测常态, 含正常账号), 其 isRewardsUser 恒 false, 不可采信;
+    //   - getuserinfo 主接口 HTTP(仅部分账号可达): dashboard.userStatus.isRewardsUser;
+    //   - 浏览器内主接口(登录态完整, 全账号可得, 同 loginCheck 生产模式)。
+    // 注意不能用余额门控: 被封号积分冻结后余额同样为 0。
+    const collectBanned = (src) => {
+        const errCode = src?.userStatus?.errorCode ?? src?.errorCode ?? null
+        const isRewardsUser = src?.userStatus?.isRewardsUser ?? src?.isRewardsUser
+        if ((errCode === 0 || errCode === null || errCode === undefined) && typeof isRewardsUser === 'boolean') return !isRewardsUser
+        return null
+    }
+    const bannedMain = userInfo ? collectBanned(userInfo?.dashboard ?? userInfo) : null
+    if (bannedMain === true) out.banned = true
+    else if (bannedMain === false) out.banned = false
+    else {
+        // 字段不可读时按主接口状态码判: 403=封禁; 302→Signin=会话受限(长期正常现象)
+        const st = await fetchStatus(USER_INFO_URL, cookieHeader, { ...fpHeaders, Origin: 'https://rewards.bing.com' }, 'https://rewards.bing.com/')
+        if (st === 403) out.banned = true
+        else if (st === 200 || st === 302) out.banned = false
+    }
     return out
 }
 
-// 浏览器部分: /redeem 渲染后读归属市场
+// 浏览器部分: 先在 rewards 首页登录态下调主接口取封禁状态(与 loginCheck 生产同款),
+// 再开 /redeem 渲染后读归属市场
 async function probeRedeemBrowser(stored, account) {
     const languageTag = new Intl.Locale(account.langCode || 'en').toString()
     const language = new Intl.Locale(languageTag).language.toLowerCase()
@@ -195,11 +236,54 @@ async function probeRedeemBrowser(stored, account) {
         })
         context.setDefaultTimeout(60000)
         const page = await context.newPage()
+
+        // 第一步: rewards 首页登录态下调 /api/getuserinfo, 取封禁状态
+        // 被封号(积分商城资格暂停)主接口直接 403 Forbidden; 正常号是 200 或
+        // 302→/Signin(会话不被主接口接受)。isRewardsUser 可读时优先用字段判定。
+        let banned = null
+        let bannedBalance = null
+        try {
+            await page.goto('https://rewards.bing.com/', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {})
+            await page.waitForTimeout(5000)
+            const info = await page.evaluate(async () => {
+                let res = null
+                for (let attempt = 0; attempt < 3; attempt++) {
+                    try {
+                        res = await fetch('/api/getuserinfo', { credentials: 'include' })
+                        if (res.ok) break
+                    } catch (e) { /* retry */ }
+                    await new Promise(r => setTimeout(r, 2000))
+                }
+                if (!res) return { ok: false, status: 0 }
+                // 302→/Signin(长期正常现象, 会话受限非封禁)时 res.ok=true 但为登录页 HTML
+                const signinRedirect = res.redirected && /sign ?in/i.test(res.url || '')
+                if (!res.ok) return { ok: false, status: res.status, signinRedirect }
+                try {
+                    const json = await res.json()
+                    const us = json?.dashboard?.userStatus ?? json?.userStatus ?? {}
+                    return { ok: true, isRewardsUser: us.isRewardsUser ?? null, balance: us.availablePoints ?? null, signinRedirect }
+                } catch {
+                    return { ok: false, status: res.status, nonJson: true, signinRedirect }
+                }
+            })
+            if (info.ok && typeof info.isRewardsUser === 'boolean') {
+                banned = !info.isRewardsUser
+                bannedBalance = info.balance
+            } else if (info.status === 403) {
+                banned = true
+            } else if (info.signinRedirect) {
+                banned = false
+            }
+        } catch (error) {
+            log('WARN', `${account.email}: 浏览器内 getuserinfo 异常 ${error.message}`)
+        }
+
+        // 第二步: /redeem 读归属市场
         await page.goto(REDEEM_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(error => {
             log('WARN', `redeem 导航未干净完成: ${error.message}`)
         })
         await page.waitForTimeout(9000) // SPA 渲染目录与横幅
-        return await page.evaluate(markers => {
+        const redeem = await page.evaluate(markers => {
             const out = { landing: null, switchBack: null, banner: false }
             const marketRe = new RegExp(markers.marketRe, 'i')
             const switchBackText = new RegExp(markers.switchBackText, 'i')
@@ -217,6 +301,9 @@ async function probeRedeemBrowser(stored, account) {
             out.banner = markers.bannerHints.some(h => body.includes(h))
             return out
         }, { marketRe: MARKET_RE.source, switchBackText: SWITCH_BACK_TEXT.source, bannerHints: BANNER_HINTS.map(s => s.toLowerCase()) })
+        redeem.banned = banned
+        redeem.bannedBalance = bannedBalance
+        return redeem
     } finally {
         await browser.close().catch(() => {})
     }
@@ -229,6 +316,7 @@ async function probeAccount(account, dbPath) {
         landing: null,
         service: null,
         profile: null,
+        banned: null,
         banner: null,
         ok: false,
         error: null,
@@ -250,6 +338,7 @@ async function probeAccount(account, dbPath) {
             const http = await probeHttp(cookieHeader, fpHeaders)
             result.profile = http.profile
             result.service = http.service
+            result.banned = http.banned
         } catch (error) {
             log('WARN', `${account.email}: HTTP 探测异常 ${error.message}`)
         }
@@ -259,6 +348,8 @@ async function probeAccount(account, dbPath) {
         const redeem = await probeRedeemBrowser(stored, account)
         result.landing = redeem.landing
         result.banner = redeem.banner
+        // 封禁判定: 浏览器登录态主接口为最权威源(HTTP 主接口可达时已先取, 浏览器值覆盖)
+        if (redeem.banned !== null && redeem.banned !== undefined) result.banned = redeem.banned
         // 归属市场: 「切换回我的国家」链接优先; 无该链接且无横幅 → 归属与落地一致
         result.market = redeem.switchBack || ((redeem.banner && !redeem.switchBack) ? null : redeem.landing)
         if (!redeem.landing) {
@@ -302,7 +393,7 @@ async function main() {
         market.accounts[account.email] = r
         market.updatedAt = Date.now()
         saveMarketFile(market) // 每号即存, 中断不丢已完成部分
-        log('INFO', `${account.email}: 市场=${r.market ?? '?'} 落地=${r.landing ?? '?'} 服务=${r.service ?? '?'} 档案=${r.profile ?? '?'} 横幅=${r.banner}${r.error ? ' | ' + r.error : ''}`)
+        log('INFO', `${account.email}: 市场=${r.market ?? '?'} 落地=${r.landing ?? '?'} 服务=${r.service ?? '?'} 档案=${r.profile ?? '?'} 封禁=${r.banned === true ? '是' : (r.banned === false ? '否' : '?')} 横幅=${r.banner}${r.error ? ' | ' + r.error : ''}`)
         if (account !== targets[targets.length - 1]) await new Promise(res => setTimeout(res, 2000))
     }
     console.log('MARKETPROBE_RESULT ' + JSON.stringify({ ok: results.some(r => r.ok), results }))

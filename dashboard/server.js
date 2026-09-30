@@ -2433,7 +2433,8 @@ function renderAccounts(now) {
     var act = a.lastRunTs ? fmtTs(a.lastRunTs) + '<div class="ts">' + fmtAgo(a.lastRunTs, now) + '</div>' : '-';
     var err = a.lastError ? '<span class="errbadge" title="' + esc(a.lastError) + '" onclick="showErrorModal(' + a.index + ')">⚠ 错误</span>' : '<span class="ts" title="最近一次运行无错误">—</span>';
     // 区域徽章: 市场=兑换目录归属(Switch back 链接判定, 橙=与当前服务区域不一致即迁移未生效);
-    // 服务=flyout 当前服务区域(随出口 IP); 档案=getuserinfo 账号资料国家(多数账号接口被拒则无)
+    // 服务=flyout 当前服务区域(随出口 IP); 档案=getuserinfo 账号资料国家(多数账号接口被拒则无);
+    // 封禁=flyout isRewardsUser=false(积分商城资格暂停, 红标)
     var regionHtml = '';
     if (a.market) {
       var mk = a.market;
@@ -2441,9 +2442,12 @@ function renderAccounts(now) {
       var mkTitle = '兑换市场(归属目录): ' + (mk.market || '未知') + (mk.banner ? '(兑换页有外出提示)' : '')
         + ' | 当前服务区域: ' + (mk.service || '未知')
         + (mk.profile ? ' | 账号档案国家: ' + mk.profile : '')
+        + (mk.banned === true ? ' | ⛔ 账号已被暂停积分商城资格(isRewardsUser=false), 跑动无收益' : (mk.banned === false ? ' | 封禁状态: 正常' : ' | 封禁状态: 本次未能确认(接口未认可会话)'))
         + (mk.checkedAt ? ' | 检测于 ' + fmtTs(mk.checkedAt) : '')
         + (mk.error ? ' | ' + mk.error : '');
-      regionHtml = '<div class="ts" title="' + esc(mkTitle) + '">🌏 市场 <b style="color:' + (mMismatch ? 'var(--warn)' : 'var(--ok)') + '">' + esc(mk.market || '?') + '</b>'
+      regionHtml = '<div class="ts" title="' + esc(mkTitle) + '">'
+        + (mk.banned === true ? '<b style="color:var(--err)">⛔ 已封禁</b> · ' : '')
+        + '🌏 市场 <b style="color:' + (mMismatch ? 'var(--warn)' : 'var(--ok)') + '">' + esc(mk.market || '?') + '</b>'
         + ' · 服务 ' + esc(mk.service || '?')
         + (mk.profile ? ' · 档案 ' + esc(mk.profile) : '')
         + '</div>';
