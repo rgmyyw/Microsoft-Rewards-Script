@@ -26,21 +26,30 @@ const projectRoot = getProjectRoot(__dirname)
 const CLASH_API_URL = process.env.CLASH_API_URL || 'http://192.168.100.1:9090'
 const CLASH_API_SECRET = process.env.CLASH_API_SECRET || ''
 
-// MSR 全链路会访问的微软域(src/constants/urls.ts 实际域 + 登录链路伴生域)。
-// client.msftauth.net 已删除: 该域 2026-09-30 实测 NXDOMAIN(微软弃用, 公共 DoH
-// 与 Clash 上游一致), 脚本也不直接访问, 保留只会造成"不可达"误报。
+// MSR 微软域全集: 2026-09-30 深夜由真实单账号 run 全程采样 Clash 连接表收集,
+// 叠加静态扫描(src 全部 https 引用)。遥测类只留一个代表(ts1.tc.mm.bing.net)。
+// client.msftauth.net 不在列: 微软弃用域名(NXDOMAIN), 勿加回。
 const MS_DOMAINS = [
-    'rewards.bing.com',
+    'bing.com',
     'www.bing.com',
+    'www2.bing.com',
     'cn.bing.com',
+    'r.bing.com',
+    'th.bing.com',
     'api.bing.com',
+    'rewards.bing.com',
     'login.live.com',
+    'storage.live.com',
     'login.microsoftonline.com',
+    'login.windows.net',
     'account.microsoft.com',
+    'csp.microsoft.com',
+    'wcpstatic.microsoft.com',
+    'edgeupdates.microsoft.com',
     'prod.rewardsplatform.microsoft.com',
-    'www.msn.com',
+    'ts1.tc.mm.bing.net',
     'www.bingapis.com',
-    'login.windows.net'
+    'www.msn.com'
 ]
 
 // 已知例外(特意走代理、不算"意外翻墙"的域)——2026-09-30 起为空:

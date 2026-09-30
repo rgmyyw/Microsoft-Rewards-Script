@@ -2770,17 +2770,15 @@ function renderNetDiag(res) {
   if (res.clashApi && res.clashApi.error) html += '<div class="ts" style="color:var(--warn)">Clash API: ' + esc(res.clashApi.url) + ' | ' + esc(res.clashApi.error) + '</div>';
   var connMap = {};
   (res.msConnections || []).forEach(function (c) { connMap[c.host] = c; });
-  html += '<div style="max-height:300px;overflow:auto"><table class="hist"><thead><tr><th>微软域</th><th>DNS</th><th>可达</th><th>Clash 链路</th></tr></thead><tbody>';
+  html += '<div style="max-height:300px;overflow:auto"><table class="hist"><thead><tr><th>微软域</th><th>可达</th><th>链路(经 Clash)</th></tr></thead><tbody>';
   (res.domains || []).forEach(function (dm) {
     var c = connMap[dm.host];
-    var bypassed = !c;
-    var chain = c ? c.chains.join(' → ') : '直连(绕过 Clash)';
-    var chainColor;
-    if (c) chainColor = (c.chains.length === 1 && c.chains[0] === 'DIRECT') ? 'var(--ok)' : 'var(--err)';
-    else chainColor = (dm.ipCountry && dm.ipCountry !== 'CN') ? 'var(--warn)' : 'var(--ok)';
-    var dnsCell = dm.dns ? esc(dm.dns) + (dm.dnsKind === 'fake-ip' ? '(fake-ip)' : '(真实IP' + (dm.ipCountry ? ' ' + esc(dm.ipCountry) : '') + ')') : esc(dm.dnsKind || '?');
-    html += '<tr><td>' + esc(dm.host) + '</td>'
-      + '<td class="ts">' + dnsCell + '</td>'
+    var chain = c ? c.chains.join(' → ') : 'DIRECT(连接过快未采样到)';
+    var chainColor = c ? (c.chains.length === 1 && c.chains[0] === 'DIRECT' ? 'var(--ok)' : 'var(--err)') : 'var(--ok)';
+    // DNS 实现细节(fake-ip/真实IP+归属)收进 hover, 不再作列展示: 部分国内 CDN 域
+    // 解析为真实 IP 但已由 OpenWrt nftset 强制引流进 Clash, 裸展示"真实IP"易误读为绕过
+    var dnsNote = dm.dns ? (dm.dnsKind === 'fake-ip' ? 'Clash fake-ip' : '国内真实IP(' + (dm.ipCountry || '?') + '), nftset 强制引流') : '解析失败';
+    html += '<tr title="解析: ' + esc(dnsNote) + (dm.finalHost && dm.finalHost !== dm.host ? '&#10;落地: ' + esc(dm.finalHost) : '') + '"><td>' + esc(dm.host) + '</td>'
       + '<td>' + (dm.reachable ? '✓' : '<span style="color:var(--warn)">✗ ' + esc(dm.error || '') + '</span>') + '</td>'
       + '<td style="color:' + chainColor + ';font-size:12px">' + esc(chain) + '</td></tr>';
   });
@@ -2791,7 +2789,7 @@ function renderNetDiag(res) {
   if (res.knownExceptions && res.knownExceptions.length) {
     html += '<div class="ts" style="margin-top:6px">已知例外(特意走节点, 不算翻墙): ' + res.knownExceptions.map(function (c) { return esc(c.host) + ' @ ' + esc(c.chains.join('/')); }).join('、') + '</div>';
   }
-  html += '<div class="ts" style="margin-top:6px">判据: 出站直连即通过 —— 经 Clash 的 DIRECT 连接、或未经过 Clash 由 OpenWrt 防火墙直接放行(大陆域名默认绕过, 同样是直连且更快)都是直连; 含代理节点 = 翻墙。fake-ip(198.18.x)=流量进 OpenClash 由规则判 DIRECT; 真实IP=绕过 Clash 直连(标注归属国, 境内=绿)。</div>';
+  html += '<div class="ts" style="margin-top:6px">判定: 全部连接经 Clash 出站, 链路 DIRECT=直连(含解析为真实 IP 但被 nftset 强制引流的国内 CDN 域, 悬停行可见解析详情); 含代理节点=翻墙红色。</div>';
   return html;
 }
 function ensureCheckPoll() {
