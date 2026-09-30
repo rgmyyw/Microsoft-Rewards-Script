@@ -27,6 +27,8 @@ const BASE_DIR = __dirname;
 const CONFIG_DIR = process.env.DASHBOARD_DATA_DIR || path.join(BASE_DIR, '..', 'config', 'dashboard');
 const PUSH_CONFIG_FILE = path.join(CONFIG_DIR, 'push-config.json');
 const STATE_FILE = path.join(CONFIG_DIR, 'state.json');
+// 兑换市场/账号区域探测结果(scripts/main/marketProbe.js 写入)
+const MARKET_FILE = path.join(CONFIG_DIR, 'market.json');
 
 const PORT = Number(process.env.DASHBOARD_PORT || 8300);
 const API_PORT = Number(process.env.API_PORT || 3010);
@@ -151,6 +153,13 @@ function ensureAccount(email) {
   if (!a || typeof a !== 'object') a = state.accounts[email] = { email };
   if (a.todayDate !== todayStr()) { a.todayDate = todayStr(); a.todayCollected = 0; }
   return a;
+}
+// ============ 兑换市场/账号区域探测结果(market.json) ============
+// 市场字段含义: market=归属市场(兑换目录, "/redeem 切换回我的国家"链接优先);
+// landing=本次 /redeem 落地市场(按出口 IP); service=flyout 当前服务区域;
+// profile=getuserinfo 档案国家(多数账号被主接口拒, 可能为 null)
+function loadMarketData() {
+  try { return JSON.parse(fs.readFileSync(MARKET_FILE, 'utf8')); } catch (e) { return { accounts: {} }; }
 }
 // 余额观测统一入口(ACCOUNT-END / 体检 / overview 实时同步都走这里):
 // 维护"当日余额锚点"(dayStartDate/dayStartBalance), "今日获得"优先按微软余额接口口径
@@ -629,6 +638,93 @@ function loginCheckStatus() {
   };
 }
 
+// ============ 兑换市场/账号区域探测(浏览器级, 全账号串行) ============
+// 复用 scripts/main/marketProbe.js: 每号恢复会话开 /redeem 读归属市场 +
+// flyout/getuserinfo 读当前服务区域与档案国家; 结果写 market.json, 前端刷新即见。
+// 与 run/体检/人工登录同属浏览器任务, 触发前互斥检查, 空闲才跑。
+const MARKET_PROBE_TIMEOUT_MS = 15 * 60 * 1000;
+let marketProbeJob = null; // 单例: { id, status, trigger, startedAt, finishedAt, error, result, logs }
+
+function startMarketProbe(trigger) {
+  if (marketProbeJob && marketProbeJob.status === 'running') return { error: '区域检测已在进行中', code: 'BUSY' };
+  for (const job of loginCheckJobs.values()) {
+    if (job.status === 'running') return { error: '登录体检在进行中, 请稍后再试', code: 'BUSY' };
+  }
+  if (manualLoginSession && !manualLoginSession.stopped) return { error: '人工登录会话进行中, 请稍后再试', code: 'BUSY' };
+  if (syncAll && syncAll.status === 'running') return { error: '余额同步在进行中, 请稍后再试', code: 'BUSY' };
+  const id = crypto.randomBytes(8).toString('hex');
+  marketProbeJob = { id, status: 'running', trigger: trigger || 'manual', startedAt: Date.now(), finishedAt: null, error: null, result: null, logs: [] };
+  log('INFO', '区域检测开始 (' + marketProbeJob.trigger + '): ' + path.join(PROJECT_ROOT, 'scripts/main/marketProbe.js'));
+  const child = spawn('node',
+    [path.join(PROJECT_ROOT, 'scripts/main/marketProbe.js'), '--all'],
+    { cwd: PROJECT_ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  let buf = '';
+  const feed = (c) => {
+    buf += c.toString();
+    let idx;
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (!line) continue;
+      marketProbeJob.logs.push(line);
+      if (marketProbeJob.logs.length > 80) marketProbeJob.logs.shift();
+      const m = line.match(/MARKETPROBE_RESULT (\{.*\})/);
+      if (m) { try { marketProbeJob.result = JSON.parse(m[1]); } catch (e) { /* ignore */ } }
+    }
+  };
+  child.stdout.on('data', feed);
+  child.stderr.on('data', feed);
+  const timer = setTimeout(() => {
+    try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { try { child.kill('SIGKILL'); } catch (e2) { /* ignore */ } }
+    marketProbeJob.status = 'error';
+    marketProbeJob.error = '区域检测超时';
+    marketProbeJob.finishedAt = Date.now();
+  }, MARKET_PROBE_TIMEOUT_MS);
+  child.on('exit', (code) => {
+    clearTimeout(timer);
+    marketProbeJob.finishedAt = Date.now();
+    marketProbeJob.exitCode = code;
+    if (marketProbeJob.status === 'running') {
+      marketProbeJob.status = marketProbeJob.result ? 'done' : 'error';
+      if (!marketProbeJob.result) marketProbeJob.error = marketProbeJob.error || ('进程退出 code=' + code);
+    }
+    log('INFO', '区域检测结束: status=' + marketProbeJob.status + (marketProbeJob.error ? ' | ' + marketProbeJob.error : ''));
+  });
+  return { ok: true, id };
+}
+
+function marketProbeStatus() {
+  if (!marketProbeJob) return { job: null, running: false };
+  return {
+    job: {
+      id: marketProbeJob.id, status: marketProbeJob.status, trigger: marketProbeJob.trigger,
+      startedAt: marketProbeJob.startedAt, finishedAt: marketProbeJob.finishedAt || null,
+      error: marketProbeJob.error || null, result: marketProbeJob.result || null,
+      lastLog: marketProbeJob.logs.length ? marketProbeJob.logs[marketProbeJob.logs.length - 1] : null,
+    },
+    running: marketProbeJob.status === 'running',
+  };
+}
+
+// 每日自动: 北京时间 15~20 点之间、当天还没测过、容器空闲时补一次(手动按钮不受限)
+const marketAutoState = { lastDate: '' };
+async function marketCatchup(trigger) {
+  try {
+    if (marketProbeJob && marketProbeJob.status === 'running') return;
+    const t = todayStr();
+    if (marketAutoState.lastDate === t) return;
+    const hour = beijingHour();
+    if (hour < 15 || hour >= 20) return;
+    const md = loadMarketData();
+    const measuredToday = md.updatedAt && new Date(md.updatedAt + 8 * 3600e3).toISOString().slice(0, 10) === t;
+    if (measuredToday) { marketAutoState.lastDate = t; return; }
+    const pts = await fetchJson('/points');
+    if (!pts || pts.running || pts.state === 'running') return;
+    marketAutoState.lastDate = t;
+    startMarketProbe(trigger || 'daily');
+  } catch (e) { /* ignore */ }
+}
+
 // ============ 全账号余额同步(接口口径) ============
 // 逐个账号串行跑 loginCheck(无头恢复会话 → rewards getuserinfo 接口读实时余额),
 // 结果经 recordBalance 落到当日锚点。RUN-END 后自动触发一次, 也可手动点按钮。
@@ -657,6 +753,7 @@ function taskSyncCatchup(trigger) {
   syncAllStart('task-catchup');
 }
 setInterval(() => { try { taskSyncCatchup('periodic-30min'); } catch (e) { /* ignore */ } }, 30 * 60 * 1000);
+setInterval(() => { void marketCatchup('periodic-30min'); }, 30 * 60 * 1000);
 
 // ==== 任务未完成自动补跑(每日最多一次) ====
 // 数据同步完成后检测: 有实测数据的账号未全部通过, 或无明细账号当日积分低于阈值
@@ -1322,6 +1419,7 @@ const server = http.createServer(async (req, res) => {
         fetchJson('/accounts'),
         fetchJson('/schedule'),
       ]);
+      const marketByEmail = (loadMarketData().accounts) || {};
       // 实时余额同步进 state(仅变化时写盘)
       let dirty = false;
       const liveAccounts = (points && points.accounts) || [];
@@ -1393,6 +1491,7 @@ const server = http.createServer(async (req, res) => {
           status: mapStatus(st, live, runningNow),
           lastError: st.lastError || live.error || null,
           lastRunTs: st.lastRunTs || null,
+          market: marketByEmail[email] || null,
         };
       };
       let all;
@@ -1464,6 +1563,21 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/login-check/status' && req.method === 'GET') {
       return json(res, 200, loginCheckStatus());
+    }
+    if (p === '/api/market-probe' && req.method === 'POST') {
+      // 空闲检查放行后才 spawn: 浏览器任务与 run 并发会挤兑容器内存
+      const pts = await fetchJson('/points');
+      if (pts && (pts.running || pts.state === 'running')) return json(res, 409, { error: '脚本运行中, 请等运行结束后再检测区域', code: 'BUSY' });
+      const r = startMarketProbe('manual');
+      if (r.error) return json(res, r.code === 'BUSY' ? 409 : 400, r);
+      return json(res, 202, r);
+    }
+    if (p === '/api/market-probe/status' && req.method === 'GET') {
+      return json(res, 200, marketProbeStatus());
+    }
+    if (p === '/api/market' && req.method === 'GET') {
+      const md = loadMarketData();
+      return json(res, 200, { accounts: md.accounts || {}, updatedAt: md.updatedAt || null });
     }
     if (p === '/api/sync-all' && req.method === 'POST') {
       const r = syncAllStart('manual');
@@ -1841,6 +1955,7 @@ const HTML = `<!DOCTYPE html>
     <button class="btn small secondary" onclick="selectVisible(false)">清空选择</button>
     <button class="btn" id="btnRun" onclick="doRun()">▶ 运行</button>
     <button class="btn small secondary" id="btnSync" onclick="doSyncAll()" title="逐个账号经微软接口实测余额与任务完成度(轻量, 不开浏览器, 每号约 2 秒)">🔄 同步余额</button>
+    <button class="btn small secondary" id="btnMarket" onclick="doMarketProbe()" title="恢复每号会话打开一次兑换页: 检测兑换市场(归属目录)与当前服务区域, 约 40-60 秒/号, 共约 5 分钟; 仅脚本空闲时可跑">🌏 检测区域</button>
   </div>
 
   <div class="tblwrap">
@@ -2041,7 +2156,7 @@ const HTML = `<!DOCTYPE html>
 </div>
 <script>
 'use strict';
-var API = { overview:'/api/overview', pushConfig:'/api/push-config', pushTest:'/api/push-test', start:'/api/start', stop:'/api/stop', loginCheck:'/api/login-check', loginCheckStatus:'/api/login-check/status', syncAll:'/api/sync-all', manualLogin:'/api/manual-login', manualLoginStatus:'/api/manual-login/status', manualLoginStop:'/api/manual-login/stop', accountsManage:'/api/accounts-manage', accountsPass:'/api/accounts-manage/password', accountsGeo:'/api/accounts-manage/geo', capabilities:'/api/capabilities', schedule:'/api/capabilities/schedule', accountLogs:'/api/account-logs', accountLogDates:'/api/account-log-dates', accountHistory:'/api/account-history' };
+var API = { overview:'/api/overview', pushConfig:'/api/push-config', pushTest:'/api/push-test', start:'/api/start', stop:'/api/stop', loginCheck:'/api/login-check', loginCheckStatus:'/api/login-check/status', syncAll:'/api/sync-all', marketProbe:'/api/market-probe', marketProbeStatus:'/api/market-probe/status', manualLogin:'/api/manual-login', manualLoginStatus:'/api/manual-login/status', manualLoginStop:'/api/manual-login/stop', accountsManage:'/api/accounts-manage', accountsPass:'/api/accounts-manage/password', accountsGeo:'/api/accounts-manage/geo', capabilities:'/api/capabilities', schedule:'/api/capabilities/schedule', accountLogs:'/api/account-logs', accountLogDates:'/api/account-log-dates', accountHistory:'/api/account-history' };
 var selected = {};
 var selectionReady = false; // 首次拿到账号列表时默认全选, 之后尊重用户的选择
 var accountsCache = [];
@@ -2229,10 +2344,26 @@ function renderAccounts(now) {
     }
     var act = a.lastRunTs ? fmtTs(a.lastRunTs) + '<div class="ts">' + fmtAgo(a.lastRunTs, now) + '</div>' : '-';
     var err = a.lastError ? '<span class="errbadge" title="' + esc(a.lastError) + '" onclick="showErrorModal(' + a.index + ')">⚠ 错误</span>' : '<span class="ts" title="最近一次运行无错误">—</span>';
+    // 区域徽章: 市场=兑换目录归属(Switch back 链接判定, 橙=与当前服务区域不一致即迁移未生效);
+    // 服务=flyout 当前服务区域(随出口 IP); 档案=getuserinfo 账号资料国家(多数账号接口被拒则无)
+    var regionHtml = '';
+    if (a.market) {
+      var mk = a.market;
+      var mMismatch = mk.market && mk.service && mk.market !== mk.service;
+      var mkTitle = '兑换市场(归属目录): ' + (mk.market || '未知') + (mk.banner ? '(兑换页有外出提示)' : '')
+        + ' | 当前服务区域: ' + (mk.service || '未知')
+        + (mk.profile ? ' | 账号档案国家: ' + mk.profile : '')
+        + (mk.checkedAt ? ' | 检测于 ' + fmtTs(mk.checkedAt) : '')
+        + (mk.error ? ' | ' + mk.error : '');
+      regionHtml = '<div class="ts" title="' + esc(mkTitle) + '">🌏 市场 <b style="color:' + (mMismatch ? 'var(--warn)' : 'var(--ok)') + '">' + esc(mk.market || '?') + '</b>'
+        + ' · 服务 ' + esc(mk.service || '?')
+        + (mk.profile ? ' · 档案 ' + esc(mk.profile) : '')
+        + '</div>';
+    }
     html += '<tr>'
       + '<td><input type="checkbox"' + checked + ' onchange="toggleSel(' + a.index + ', this.checked)"></td>'
       + '<td>' + rowNo + '</td>'
-      + '<td class="em">' + esc(a.email) + '</td>'
+      + '<td class="em">' + esc(a.email) + regionHtml + '</td>'
       + '<td class="num">' + bal + balTs + '</td>'
       + '<td class="num" style="color:var(--ok)">' + today + live + '</td>'
       + '<td style="font-size:12px">' + taskCell + '</td>'
@@ -2452,6 +2583,46 @@ function doCheck(index) {
       scheduleRefresh();
     })
     .catch(function (e) { alert('触发失败: ' + e.message); });
+}
+
+// ==== 兑换市场/账号区域检测 ====
+var marketPollTimer = null;
+function doMarketProbe() {
+  if (!confirm('检测全部账号的兑换市场与所在区域?每号恢复会话打开一次兑换页, 约 40-60 秒/号, 共约 5 分钟; 仅脚本空闲时可跑。')) return;
+  fetch(API.marketProbe, { method: 'POST' })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (d && d.error) { alert(d.error); return; }
+      ensureMarketPoll();
+    })
+    .catch(function (e) { alert('触发失败: ' + e.message); });
+}
+function ensureMarketPoll() {
+  if (marketPollTimer) return;
+  var mb = $('btnMarket');
+  if (mb) { mb.disabled = true; mb.textContent = '🌏 检测中…'; }
+  marketPollTimer = setInterval(function () {
+    fetch(API.marketProbeStatus).then(function (r) { return r.json(); }).then(function (d) {
+      var running = !!(d && d.running);
+      if (mb) {
+        if (running) {
+          mb.disabled = true;
+          mb.textContent = '🌏 检测中…';
+          if (d.job && d.job.lastLog) mb.title = d.job.lastLog;
+        } else {
+          mb.disabled = false;
+          mb.textContent = '🌏 检测区域';
+          mb.title = '恢复每号会话打开一次兑换页: 检测兑换市场(归属目录)与当前服务区域, 约 40-60 秒/号; 仅脚本空闲时可跑';
+        }
+      }
+      if (!running && marketPollTimer) {
+        clearInterval(marketPollTimer);
+        marketPollTimer = null;
+        if (d && d.job && d.job.status === 'error') alert('区域检测失败: ' + (d.job.error || '未知原因'));
+        scheduleRefresh();
+      }
+    }).catch(function () {});
+  }, 4000);
 }
 function ensureCheckPoll() {
   if (checkPollTimer) return;
@@ -2807,6 +2978,8 @@ document.addEventListener('click', function (e) {
 })();
 updateIvUi();
 scheduleRefresh();
+// 页面加载即检查一次区域检测状态: 后台正在跑(如每日自动)时恢复按钮为"检测中"
+fetch(API.marketProbeStatus).then(function (r) { return r.json(); }).then(function (d) { if (d && d.running) ensureMarketPoll(); }).catch(function () {});
 </script>
 </body>
 </html>`;
@@ -2840,6 +3013,8 @@ setTimeout(async () => {
 }, 20000);
 // 启动 60s 后补齐缺失的今日任务实测数据(运行中会自动跳过, 30 分钟周期重试)
 setTimeout(() => { try { taskSyncCatchup('startup'); } catch (e) { /* ignore */ } }, 60000);
+// 启动即测一次市场数据新鲜度(容器重启后 market.json 仍在, 但当天没测过且空闲则补测)
+setTimeout(() => { void marketCatchup('startup'); }, 120000);
 log('INFO', 'MS-Rewards dashboard 启动, 端口 ' + PORT + ' (内网无鉴权)');
 log('INFO', '容器 API: ' + API_BASE + (API_TOKEN ? ' (token 已加载)' : ' (⚠ 未读取到 token)'));
 
