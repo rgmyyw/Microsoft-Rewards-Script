@@ -725,6 +725,77 @@ async function marketCatchup(trigger) {
   } catch (e) { /* ignore */ }
 }
 
+// ============ 网络诊断(确认微软域流量全部直连) ============
+// 复用 scripts/main/netDiag.js: 主动请求微软域 + 同步采样 OpenClash 连接表,
+// verdict: direct=经 Clash DIRECT / bypass=绕过 Clash 直连 / proxied=发现意外代理 / unknown
+const NETDIAG_TIMEOUT_MS = 150000;
+const NETDIAG_FILE = path.join(CONFIG_DIR, 'net-diag.json');
+let netDiagJob = null;
+
+function loadNetDiagLast() {
+  try { return JSON.parse(fs.readFileSync(NETDIAG_FILE, 'utf8')); } catch (e) { return null; }
+}
+
+function startNetDiag(trigger) {
+  if (netDiagJob && netDiagJob.status === 'running') return { error: '网络诊断已在进行中', code: 'BUSY' };
+  const id = crypto.randomBytes(8).toString('hex');
+  netDiagJob = { id, status: 'running', trigger: trigger || 'manual', startedAt: Date.now(), finishedAt: null, error: null, result: null, logs: [] };
+  log('INFO', '网络诊断开始 (' + netDiagJob.trigger + ')');
+  const child = spawn('node',
+    [path.join(PROJECT_ROOT, 'scripts/main/netDiag.js')],
+    { cwd: PROJECT_ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let buf = '';
+  const feed = (c) => {
+    buf += c.toString();
+    let idx;
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (!line) continue;
+      netDiagJob.logs.push(line);
+      if (netDiagJob.logs.length > 40) netDiagJob.logs.shift();
+      const m = line.match(/NETDIAG_RESULT (\{.*\})/);
+      if (m) { try { netDiagJob.result = JSON.parse(m[1]); } catch (e) { /* ignore */ } }
+    }
+  };
+  child.stdout.on('data', feed);
+  child.stderr.on('data', feed);
+  const timer = setTimeout(() => {
+    try { child.kill('SIGKILL'); } catch (e) { /* ignore */ }
+    netDiagJob.status = 'error';
+    netDiagJob.error = '网络诊断超时';
+    netDiagJob.finishedAt = Date.now();
+  }, NETDIAG_TIMEOUT_MS);
+  child.on('exit', (code) => {
+    clearTimeout(timer);
+    netDiagJob.finishedAt = Date.now();
+    netDiagJob.exitCode = code;
+    if (netDiagJob.status === 'running') {
+      netDiagJob.status = netDiagJob.result ? 'done' : 'error';
+      if (!netDiagJob.result) netDiagJob.error = netDiagJob.error || ('进程退出 code=' + code);
+    }
+    if (netDiagJob.result) {
+      try { fs.writeFileSync(NETDIAG_FILE, JSON.stringify(netDiagJob.result, null, 2)); } catch (e) { /* ignore */ }
+    }
+    log('INFO', '网络诊断结束: status=' + netDiagJob.status + (netDiagJob.error ? ' | ' + netDiagJob.error : ''));
+  });
+  return { ok: true, id };
+}
+
+function netDiagStatus() {
+  if (!netDiagJob) return { job: null, running: false, last: loadNetDiagLast() };
+  return {
+    job: {
+      id: netDiagJob.id, status: netDiagJob.status, trigger: netDiagJob.trigger,
+      startedAt: netDiagJob.startedAt, finishedAt: netDiagJob.finishedAt || null,
+      error: netDiagJob.error || null, result: netDiagJob.result || null,
+      lastLog: netDiagJob.logs.length ? netDiagJob.logs[netDiagJob.logs.length - 1] : null,
+    },
+    running: netDiagJob.status === 'running',
+    last: loadNetDiagLast(),
+  };
+}
+
 // ============ 全账号余额同步(接口口径) ============
 // 逐个账号串行跑 loginCheck(无头恢复会话 → rewards getuserinfo 接口读实时余额),
 // 结果经 recordBalance 落到当日锚点。RUN-END 后自动触发一次, 也可手动点按钮。
@@ -1579,6 +1650,14 @@ const server = http.createServer(async (req, res) => {
       const md = loadMarketData();
       return json(res, 200, { accounts: md.accounts || {}, updatedAt: md.updatedAt || null });
     }
+    if (p === '/api/net-diag' && req.method === 'POST') {
+      const r = startNetDiag('manual');
+      if (r.error) return json(res, r.code === 'BUSY' ? 409 : 400, r);
+      return json(res, 202, r);
+    }
+    if (p === '/api/net-diag/status' && req.method === 'GET') {
+      return json(res, 200, netDiagStatus());
+    }
     if (p === '/api/sync-all' && req.method === 'POST') {
       const r = syncAllStart('manual');
       if (r.error) return json(res, r.code === 'BUSY' ? 409 : 400, r);
@@ -1956,6 +2035,7 @@ const HTML = `<!DOCTYPE html>
     <button class="btn" id="btnRun" onclick="doRun()">▶ 运行</button>
     <button class="btn small secondary" id="btnSync" onclick="doSyncAll()" title="逐个账号经微软接口实测余额与任务完成度(轻量, 不开浏览器, 每号约 2 秒)">🔄 同步余额</button>
     <button class="btn small secondary" id="btnMarket" onclick="doMarketProbe()" title="恢复每号会话打开一次兑换页: 检测兑换市场(归属目录)与当前服务区域, 约 40-60 秒/号, 共约 5 分钟; 仅脚本空闲时可跑">🌏 检测区域</button>
+    <button class="btn small secondary" id="btnNetDiag" onclick="doNetDiag()" title="一键诊断网络: 请求全部微软域并核对 OpenClash 连接表, 确认没有流量走代理节点(约 30 秒)">🛰 网络诊断</button>
   </div>
 
   <div class="tblwrap">
@@ -1986,6 +2066,14 @@ const HTML = `<!DOCTYPE html>
     </table>
   </details>
 
+  <dialog id="netDiagModal">
+    <h2>🛰 网络诊断</h2>
+    <div id="netDiagBody">诊断中…</div>
+    <div style="margin-top:14px;text-align:right">
+      <button class="btn secondary" onclick="document.getElementById('netDiagModal').close()">关闭</button>
+      <button class="btn" onclick="doNetDiag()">重新诊断</button>
+    </div>
+  </dialog>
   <dialog id="pushModal">
     <h2>🔔 推送设置（钉钉）</h2>
     <div class="grid-2">
@@ -2156,7 +2244,7 @@ const HTML = `<!DOCTYPE html>
 </div>
 <script>
 'use strict';
-var API = { overview:'/api/overview', pushConfig:'/api/push-config', pushTest:'/api/push-test', start:'/api/start', stop:'/api/stop', loginCheck:'/api/login-check', loginCheckStatus:'/api/login-check/status', syncAll:'/api/sync-all', marketProbe:'/api/market-probe', marketProbeStatus:'/api/market-probe/status', manualLogin:'/api/manual-login', manualLoginStatus:'/api/manual-login/status', manualLoginStop:'/api/manual-login/stop', accountsManage:'/api/accounts-manage', accountsPass:'/api/accounts-manage/password', accountsGeo:'/api/accounts-manage/geo', capabilities:'/api/capabilities', schedule:'/api/capabilities/schedule', accountLogs:'/api/account-logs', accountLogDates:'/api/account-log-dates', accountHistory:'/api/account-history' };
+var API = { overview:'/api/overview', pushConfig:'/api/push-config', pushTest:'/api/push-test', start:'/api/start', stop:'/api/stop', loginCheck:'/api/login-check', loginCheckStatus:'/api/login-check/status', syncAll:'/api/sync-all', marketProbe:'/api/market-probe', marketProbeStatus:'/api/market-probe/status', netDiag:'/api/net-diag', netDiagStatus:'/api/net-diag/status', manualLogin:'/api/manual-login', manualLoginStatus:'/api/manual-login/status', manualLoginStop:'/api/manual-login/stop', accountsManage:'/api/accounts-manage', accountsPass:'/api/accounts-manage/password', accountsGeo:'/api/accounts-manage/geo', capabilities:'/api/capabilities', schedule:'/api/capabilities/schedule', accountLogs:'/api/account-logs', accountLogDates:'/api/account-log-dates', accountHistory:'/api/account-history' };
 var selected = {};
 var selectionReady = false; // 首次拿到账号列表时默认全选, 之后尊重用户的选择
 var accountsCache = [];
@@ -2624,6 +2712,80 @@ function ensureMarketPoll() {
     }).catch(function () {});
   }, 4000);
 }
+
+// ==== 一键网络诊断: 确认微软域流量全部直连 ====
+var netDiagPollTimer = null;
+function doNetDiag() {
+  fetch(API.netDiag, { method: 'POST' })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (d && d.error) { alert(d.error); return; }
+      var nb = $('netDiagBody');
+      if (nb) { nb.textContent = '🛰 诊断中(约 30 秒): 正在请求微软域并核对 Clash 连接表…'; }
+      var dlg = document.getElementById('netDiagModal');
+      if (dlg && !dlg.open) dlg.showModal();
+      ensureNetDiagPoll();
+    })
+    .catch(function (e) { alert('触发失败: ' + e.message); });
+}
+function ensureNetDiagPoll() {
+  if (netDiagPollTimer) return;
+  var ndb = $('btnNetDiag');
+  if (ndb) { ndb.disabled = true; ndb.textContent = '🛰 诊断中…'; }
+  netDiagPollTimer = setInterval(function () {
+    fetch(API.netDiagStatus).then(function (r) { return r.json(); }).then(function (d) {
+      var running = !!(d && d.running);
+      if (ndb) {
+        ndb.disabled = running;
+        ndb.textContent = running ? '🛰 诊断中…' : '🛰 网络诊断';
+      }
+      if (running) {
+        var nb0 = $('netDiagBody');
+        if (nb0 && d.job && d.job.lastLog) nb0.innerHTML = '<div class="ts">' + esc(d.job.lastLog) + '</div>诊断中…';
+        return;
+      }
+      if (netDiagPollTimer) { clearInterval(netDiagPollTimer); netDiagPollTimer = null; }
+      var res = (d && d.job && d.job.result) || (d && d.last) || null;
+      var body = $('netDiagBody');
+      if (body) {
+        if (!res) body.innerHTML = '<span style="color:var(--err)">诊断失败: ' + esc((d && d.job && d.job.error) || '无结果') + '</span>';
+        else body.innerHTML = renderNetDiag(res);
+      }
+      if (ndb && res) {
+        var vt = { direct: '✅ 全部直连(经 Clash DIRECT)', bypass: '✅ 全部直连(未经过 Clash)', proxied: '❌ 发现意外代理流量', unknown: '⚠ 无法判定' };
+        ndb.title = '上次诊断(' + fmtTs(res.checkedAt) + '): ' + (vt[res.verdict] || res.verdict) + ';点击重新诊断';
+      }
+    }).catch(function () {});
+  }, 3000);
+}
+function renderNetDiag(res) {
+  var vt = { direct: '✅ 全部直连（经 Clash DIRECT 出站）', bypass: '✅ 全部直连（未经过 Clash，绕过规则直连）', proxied: '❌ 发现意外代理流量', unknown: '⚠ 无法判定（Clash API 不可用）' };
+  var color = (res.verdict === 'direct' || res.verdict === 'bypass') ? 'var(--ok)' : (res.verdict === 'proxied' ? 'var(--err)' : 'var(--warn)');
+  var html = '<div style="font-size:15px;font-weight:600;color:' + color + ';margin-bottom:8px">' + (vt[res.verdict] || res.verdict)
+    + ' <span class="ts">(' + fmtTs(res.checkedAt) + ')</span></div>';
+  if (res.clashApi && res.clashApi.error) html += '<div class="ts" style="color:var(--warn)">Clash API: ' + esc(res.clashApi.url) + ' | ' + esc(res.clashApi.error) + '</div>';
+  var connMap = {};
+  (res.msConnections || []).forEach(function (c) { connMap[c.host] = c; });
+  html += '<div style="max-height:300px;overflow:auto"><table class="hist"><thead><tr><th>微软域</th><th>DNS</th><th>可达</th><th>Clash 链路</th></tr></thead><tbody>';
+  (res.domains || []).forEach(function (dm) {
+    var c = connMap[dm.host];
+    var chain = c ? c.chains.join(' → ') : '—(未经过 Clash)';
+    var chainColor = !c ? 'var(--muted)' : (c.chains.length === 1 && c.chains[0] === 'DIRECT' ? 'var(--ok)' : 'var(--err)');
+    html += '<tr><td>' + esc(dm.host) + '</td>'
+      + '<td class="ts">' + (dm.dns ? esc(dm.dns) + (dm.dnsKind === 'fake-ip' ? '(fake-ip)' : '(真实IP)') : esc(dm.dnsKind || '?')) + '</td>'
+      + '<td>' + (dm.reachable ? '✓' : '<span style="color:var(--warn)">✗ ' + esc(dm.error || '') + '</span>') + '</td>'
+      + '<td style="color:' + chainColor + ';font-size:12px">' + esc(chain) + '</td></tr>';
+  });
+  html += '</tbody></table></div>';
+  if (res.proxied && res.proxied.length) {
+    html += '<div style="color:var(--err);margin-top:8px">意外代理(需处理): ' + res.proxied.map(function (c) { return esc(c.host) + ' @ ' + esc(c.chains.join('/')); }).join('、') + '</div>';
+  }
+  if (res.knownExceptions && res.knownExceptions.length) {
+    html += '<div class="ts" style="margin-top:6px">已知例外(特意走节点, 不算翻墙): ' + res.knownExceptions.map(function (c) { return esc(c.host) + ' @ ' + esc(c.chains.join('/')); }).join('、') + '</div>';
+  }
+  html += '<div class="ts" style="margin-top:6px">判据: 连接链 DIRECT 或未经过 Clash = 直连; 含代理节点 = 翻墙。fake-ip(198.18.x)表示流量进入 OpenClash 由规则判定。</div>';
+  return html;
+}
 function ensureCheckPoll() {
   if (checkPollTimer) return;
   checkPollTimer = setInterval(function () {
@@ -2980,6 +3142,16 @@ updateIvUi();
 scheduleRefresh();
 // 页面加载即检查一次区域检测状态: 后台正在跑(如每日自动)时恢复按钮为"检测中"
 fetch(API.marketProbeStatus).then(function (r) { return r.json(); }).then(function (d) { if (d && d.running) ensureMarketPoll(); }).catch(function () {});
+// 页面加载显示上次网络诊断结论(按钮悬停可见), 后台正在跑则恢复轮询弹窗
+fetch(API.netDiagStatus).then(function (r) { return r.json(); }).then(function (d) {
+  if (d && d.running) { ensureNetDiagPoll(); return; }
+  var last = d && d.last;
+  var nb = $('btnNetDiag');
+  if (last && nb) {
+    var vt = { direct: '✅ 全部直连(经 Clash DIRECT)', bypass: '✅ 全部直连(未经过 Clash)', proxied: '❌ 发现意外代理流量', unknown: '⚠ 无法判定' };
+    nb.title = '上次诊断(' + fmtTs(last.checkedAt) + '): ' + (vt[last.verdict] || last.verdict) + ';点击重新诊断(约 30 秒)';
+  }
+}).catch(function () {});
 </script>
 </body>
 </html>`;
