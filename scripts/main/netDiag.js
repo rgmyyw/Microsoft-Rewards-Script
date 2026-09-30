@@ -161,8 +161,12 @@ async function main() {
 
     const domains = []
     for (const d of MS_DOMAINS) {
-        // 请求期间并发采样连接表: 流量发生时链路一定在表里(fake-ip 长连接 keep-alive 数秒)
-        const sampling = Promise.all([sampleClash(), new Promise(r => setTimeout(r, 400)).then(sampleClash)])
+        // 请求期间密集采样连接表: 4xx 响应的连接存活常不足 1 秒, 必须早采样
+        const sampling = Promise.all([
+            sampleClash(),
+            new Promise(r => setTimeout(r, 150)).then(sampleClash),
+            new Promise(r => setTimeout(r, 500)).then(sampleClash)
+        ])
         const r = await probeDomain(d)
         await sampling
         domains.push(r)
