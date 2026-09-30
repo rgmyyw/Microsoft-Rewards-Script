@@ -89,8 +89,24 @@ function pickMsConnections(conns) {
     return out
 }
 
+// 查真实 IP 归属(仅对绕过 Clash 的大陆域, 校验其确为国内直连; 查询失败不影响判定)
+async function lookupIpCountry(ip) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 5000)
+    try {
+        const res = await fetch('http://ip-api.com/json/' + ip + '?fields=countryCode', { signal: controller.signal })
+        clearTimeout(timer)
+        if (!res.ok) return null
+        const j = await res.json()
+        return typeof j.countryCode === 'string' ? j.countryCode.toUpperCase() : null
+    } catch {
+        clearTimeout(timer)
+        return null
+    }
+}
+
 async function probeDomain(domain) {
-    const result = { host: domain, reachable: null, finalHost: null, dns: null, dnsKind: null }
+    const result = { host: domain, reachable: null, finalHost: null, dns: null, dnsKind: null, ipCountry: null }
     try {
         const answers = await dns.resolve4(domain)
         result.dns = answers[0] || null
@@ -118,6 +134,7 @@ async function probeDomain(domain) {
         result.reachable = false
         result.error = String(error?.message ?? error).slice(0, 80)
     }
+    if (result.dnsKind === 'real' && result.dns) result.ipCountry = await lookupIpCountry(result.dns)
     return result
 }
 
@@ -185,7 +202,7 @@ async function main() {
         knownExceptions: knownExceptions.map(c => ({ host: c.host, chains: c.chains })),
         checkedAt: Date.now()
     }
-    const verdictText = { proxied: '发现意外代理流量', direct: '全部直连(经 Clash DIRECT 出站)', bypass: '全部直连(未经过 Clash, 绕过规则直连)', unknown: '无法判定(Clash API 不可用)' }
+    const verdictText = { proxied: '发现意外代理流量', direct: '全部直连', bypass: '全部直连(OpenWrt 防火墙直接放行)', unknown: '无法判定(Clash API 不可用)' }
     log('INFO', `网络诊断结论: ${verdict} = ${verdictText[verdict] || verdict}`
         + (proxied.length ? ' | 翻墙连接: ' + proxied.map(c => c.host + '@' + c.chains.join('/')).join(', ') : '')
         + (knownExceptions.length ? ' | 已知例外(节点): ' + knownExceptions.map(c => c.host).join(', ') : ''))

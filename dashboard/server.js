@@ -2756,14 +2756,14 @@ function ensureNetDiagPoll() {
         else body.innerHTML = renderNetDiag(res);
       }
       if (ndb && res) {
-        var vt = { direct: '✅ 全部直连(经 Clash DIRECT)', bypass: '✅ 全部直连(未经过 Clash)', proxied: '❌ 发现意外代理流量', unknown: '⚠ 无法判定' };
+        var vt = { direct: '✅ 全部直连', bypass: '✅ 全部直连(OpenWrt 直接放行)', proxied: '❌ 发现意外代理流量', unknown: '⚠ 无法判定' };
         ndb.title = '上次诊断(' + fmtTs(res.checkedAt) + '): ' + (vt[res.verdict] || res.verdict) + ';点击重新诊断';
       }
     }).catch(function () {});
   }, 3000);
 }
 function renderNetDiag(res) {
-  var vt = { direct: '✅ 全部直连（经 Clash DIRECT 出站）', bypass: '✅ 全部直连（未经过 Clash，绕过规则直连）', proxied: '❌ 发现意外代理流量', unknown: '⚠ 无法判定（Clash API 不可用）' };
+  var vt = { direct: '✅ 全部直连', bypass: '✅ 全部直连（OpenWrt 直接放行）', proxied: '❌ 发现意外代理流量', unknown: '⚠ 无法判定（Clash API 不可用）' };
   var color = (res.verdict === 'direct' || res.verdict === 'bypass') ? 'var(--ok)' : (res.verdict === 'proxied' ? 'var(--err)' : 'var(--warn)');
   var html = '<div style="font-size:15px;font-weight:600;color:' + color + ';margin-bottom:8px">' + (vt[res.verdict] || res.verdict)
     + ' <span class="ts">(' + fmtTs(res.checkedAt) + ')</span></div>';
@@ -2773,10 +2773,14 @@ function renderNetDiag(res) {
   html += '<div style="max-height:300px;overflow:auto"><table class="hist"><thead><tr><th>微软域</th><th>DNS</th><th>可达</th><th>Clash 链路</th></tr></thead><tbody>';
   (res.domains || []).forEach(function (dm) {
     var c = connMap[dm.host];
-    var chain = c ? c.chains.join(' → ') : '—(未经过 Clash)';
-    var chainColor = !c ? 'var(--muted)' : (c.chains.length === 1 && c.chains[0] === 'DIRECT' ? 'var(--ok)' : 'var(--err)');
+    var bypassed = !c;
+    var chain = c ? c.chains.join(' → ') : '直连(绕过 Clash)';
+    var chainColor;
+    if (c) chainColor = (c.chains.length === 1 && c.chains[0] === 'DIRECT') ? 'var(--ok)' : 'var(--err)';
+    else chainColor = (dm.ipCountry && dm.ipCountry !== 'CN') ? 'var(--warn)' : 'var(--ok)';
+    var dnsCell = dm.dns ? esc(dm.dns) + (dm.dnsKind === 'fake-ip' ? '(fake-ip)' : '(真实IP' + (dm.ipCountry ? ' ' + esc(dm.ipCountry) : '') + ')') : esc(dm.dnsKind || '?');
     html += '<tr><td>' + esc(dm.host) + '</td>'
-      + '<td class="ts">' + (dm.dns ? esc(dm.dns) + (dm.dnsKind === 'fake-ip' ? '(fake-ip)' : '(真实IP)') : esc(dm.dnsKind || '?')) + '</td>'
+      + '<td class="ts">' + dnsCell + '</td>'
       + '<td>' + (dm.reachable ? '✓' : '<span style="color:var(--warn)">✗ ' + esc(dm.error || '') + '</span>') + '</td>'
       + '<td style="color:' + chainColor + ';font-size:12px">' + esc(chain) + '</td></tr>';
   });
@@ -2787,7 +2791,7 @@ function renderNetDiag(res) {
   if (res.knownExceptions && res.knownExceptions.length) {
     html += '<div class="ts" style="margin-top:6px">已知例外(特意走节点, 不算翻墙): ' + res.knownExceptions.map(function (c) { return esc(c.host) + ' @ ' + esc(c.chains.join('/')); }).join('、') + '</div>';
   }
-  html += '<div class="ts" style="margin-top:6px">判据: 连接链 DIRECT 或未经过 Clash = 直连; 含代理节点 = 翻墙。fake-ip(198.18.x)表示流量进入 OpenClash 由规则判定。</div>';
+  html += '<div class="ts" style="margin-top:6px">判据: 出站直连即通过 —— 经 Clash 的 DIRECT 连接、或未经过 Clash 由 OpenWrt 防火墙直接放行(大陆域名默认绕过, 同样是直连且更快)都是直连; 含代理节点 = 翻墙。fake-ip(198.18.x)=流量进 OpenClash 由规则判 DIRECT; 真实IP=绕过 Clash 直连(标注归属国, 境内=绿)。</div>';
   return html;
 }
 function ensureCheckPoll() {
@@ -3152,7 +3156,7 @@ fetch(API.netDiagStatus).then(function (r) { return r.json(); }).then(function (
   var last = d && d.last;
   var nb = $('btnNetDiag');
   if (last && nb) {
-    var vt = { direct: '✅ 全部直连(经 Clash DIRECT)', bypass: '✅ 全部直连(未经过 Clash)', proxied: '❌ 发现意外代理流量', unknown: '⚠ 无法判定' };
+    var vt = { direct: '✅ 全部直连', bypass: '✅ 全部直连(OpenWrt 直接放行)', proxied: '❌ 发现意外代理流量', unknown: '⚠ 无法判定' };
     nb.title = '上次诊断(' + fmtTs(last.checkedAt) + '): ' + (vt[last.verdict] || last.verdict) + ';点击重新诊断(约 30 秒)';
   }
 }).catch(function () {});
