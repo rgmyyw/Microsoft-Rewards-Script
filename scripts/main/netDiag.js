@@ -43,10 +43,11 @@ const MS_DOMAINS = [
     'login.windows.net'
 ]
 
-// 已知例外: 用户特意配到代理组、不属于"意外翻墙"的域。
-// account.microsoft.com 直连被 Akamai 拒机房 IP(AGENTS.md MSR 区域备注),
-// overwrite.sh 单列 DOMAIN 规则指向业务专用组, 走节点是预期行为。
-const KNOWN_PROXIED_DOMAINS = ['account.microsoft.com']
+// 已知例外(特意走代理、不算"意外翻墙"的域)——2026-09-30 起为空:
+// account.microsoft.com 曾因直连被 Akamai 拒(TLS 后无响应)而单列业务专用组,
+// 用户明示"微软所有域一律直连"后已在 overwrite.sh 删除该单列规则, 归并入
+// DOMAIN-SUFFIX,microsoft.com(常态 DIRECT, redeem-mode 时随微软全域切香港)。
+const KNOWN_PROXIED_DOMAINS = []
 
 // 连接表里微软域的匹配词(覆盖目标 host 与 sniffHost)
 const MS_MATCHERS = ['bing.com', 'bingapis.com', 'microsoft', 'msn.com', 'msftauth.net', 'live.com', 'windows.net', 'live.net']
