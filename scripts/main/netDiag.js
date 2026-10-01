@@ -48,8 +48,11 @@ const MS_DOMAINS = [
     'edgeupdates.microsoft.com',
     'prod.rewardsplatform.microsoft.com',
     'ts1.tc.mm.bing.net',
+    'aadcdn.msauth.net',
+    'aadcdn.msftauth.net',
     'www.bingapis.com',
-    'www.msn.com'
+    'www.msn.com',
+    'img-s-msn-com.akamaized.net'
 ]
 
 // 已知例外(特意走代理、不算"意外翻墙"的域)——2026-09-30 起为空:
