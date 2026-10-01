@@ -1063,7 +1063,7 @@ function mlStop(session, reason) {
   setTimeout(() => mlCleanupProcs(session), 2500);
 }
 
-async function startManualLogin(accountIndex) {
+async function startManualLogin(accountIndex, mode) {
   if (manualLoginSession && !manualLoginSession.done && !manualLoginSession.stopped) {
     return { error: '已有人工登录会话进行中(同一时间仅支持一个)', code: 'BUSY' };
   }
@@ -1071,11 +1071,12 @@ async function startManualLogin(accountIndex) {
   const acc = (((accs || {}).accounts) || []).find(a => a.index === accountIndex);
   if (!acc) return { error: '未知账号序号: ' + accountIndex, code: 'BAD_REQUEST' };
   const email = acc.email;
+  const redeem = mode === 'redeem';
 
   const procs = {};
   const session = manualLoginSession = {
     token: crypto.randomBytes(16).toString('hex'),
-    accountIndex, email, startedAt: Date.now(),
+    accountIndex, email, mode: redeem ? 'redeem' : 'login', startedAt: Date.now(),
     logs: [], procs, stopped: false, done: false,
   };
   // 上次会话若被强杀会残留 X 锁文件, 导致 Xvfb 起不来("Server is already active")
@@ -1102,7 +1103,8 @@ async function startManualLogin(accountIndex) {
     await new Promise(r => setTimeout(r, 250));
   }
   procs.runner = spawn('node',
-    [path.join(PROJECT_ROOT, 'scripts/main/manualLogin.js'), '--email', email, '--platform', 'both'],
+    [path.join(PROJECT_ROOT, 'scripts/main/manualLogin.js'), '--email', email,
+      ...(redeem ? ['--redeem'] : ['--platform', 'both'])],
     { cwd: PROJECT_ROOT, env: Object.assign({}, process.env, { DISPLAY: ML_DISPLAY }), detached: true });
 
   session.watchdog = setTimeout(() => {
@@ -1118,11 +1120,14 @@ async function startManualLogin(accountIndex) {
   procs.runner.on('exit', (code) => {
     session.done = true;
     session.runnerExit = code;
-    mlPushLog(session, '[dashboard] manualLogin 退出 code=' + code + (code === 0 ? '(会话已保存)' : '(未保存完整登录)'));
+    mlPushLog(session, '[dashboard] manualLogin 退出 code=' + code + (code === 0 ? (session.mode === 'redeem' ? '(兑换页会话已保存)' : '(会话已保存)') : '(未保存完整登录)'));
     if (code !== 0) {
       // 找出 runner 的报错行, 透出到状态接口方便定位
       const errLine = [...session.logs].reverse().find(l => /ERROR|error|Failed|failed|doesn't exist|not found/i.test(l));
       session.failLog = errLine || session.logs[session.logs.length - 2] || null;
+    } else if (session.mode === 'redeem') {
+      // 兑换页浏览结束: cookie 已由 runner 回写, 不翻转授权状态、不触发体检(非登录)
+      try { const a = ensureAccount(email); a.lastCheckTs = Date.now(); saveState(); } catch (e) { /* ignore */ }
     } else {
       // 人工登录成功(会话已保存): 立即翻转授权状态, 去掉 🔐 重新授权 标记(2026-09-05 修复)
       try {
@@ -1140,8 +1145,8 @@ async function startManualLogin(accountIndex) {
     }
     setTimeout(() => { mlCleanupProcs(session); }, 2000);
   });
-  log('INFO', '人工登录会话启动: ' + email + ' (token=' + session.token.slice(0, 8) + '...)');
-  return { ok: true, token: session.token, email };
+  log('INFO', (redeem ? '兑换页浏览会话启动' : '人工登录会话启动') + ': ' + email + ' (token=' + session.token.slice(0, 8) + '...)');
+  return { ok: true, token: session.token, email, mode: session.mode };
 }
 
 function manualLoginStatus() {
@@ -1153,6 +1158,7 @@ function manualLoginStatus() {
     done: s.done,
     stopped: s.stopped,
     email: s.email,
+    mode: s.mode || 'login',
     startedAt: s.startedAt,
     token: active ? s.token : null,
     runnerExit: s.runnerExit != null ? s.runnerExit : null,
@@ -1668,7 +1674,8 @@ const server = http.createServer(async (req, res) => {
       try { body = await readBody(req); } catch (e) { body = {}; }
       const index = Number(body.accountIndex);
       if (!Number.isSafeInteger(index) || index < 1) return json(res, 400, { error: 'accountIndex 无效' });
-      const r = await startManualLogin(index);
+      const mode = body.mode === 'redeem' ? 'redeem' : 'login';
+      const r = await startManualLogin(index, mode);
       if (r.error) return json(res, r.code === 'BUSY' ? 409 : 400, r);
       return json(res, 202, r);
     }
@@ -2466,6 +2473,7 @@ function renderAccounts(now) {
       + '<button class="btn small secondary" title="查看该账号实时运行日志" onclick="openLogs(' + a.index + ')">📜</button> '
       + '<button class="btn small secondary" title="登录体检: 无头检查会话并刷新实时余额(约 30-60 秒)" onclick="doCheck(' + a.index + ')">🩺</button> '
       + '<button class="btn small secondary" title="人工登录: 在容器内浏览器完成微软验证, 自动保存会话" onclick="doManualLogin(' + a.index + ')">🔑</button>'
+      + ' <button class="btn small secondary" title="打开兑换页: 用该账号已保存的会话在容器内浏览器打开 rewards 兑换页, 经 noVNC 在网页里浏览/操作" onclick="doRedeem(' + a.index + ')">🛒</button>'
       + (a.validity === 'need-reauth' ? ' <button class="btn small danger" title="该账号需要重新授权: 点击在容器内浏览器完成微软验证" onclick="doManualLogin(' + a.index + ')">🔐 重新授权</button>' : '')
       + checkNote(a)
       + '</td>'
@@ -2815,11 +2823,21 @@ function doManualLogin(index) {
   var email = '#' + index;
   for (var i = 0; i < accountsCache.length; i++) if (accountsCache[i].index === index) email = accountsCache[i].email;
   if (!confirm('为 ' + email + ' 打开人工登录窗口?将在容器内依次打开移动端/桌面端浏览器, 完成微软登录并停留在 Rewards 页面 5 秒后自动保存。')) return;
-  fetch(API.manualLogin, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accountIndex: index }) })
+  openMlSession(index, 'login');
+}
+// 打开该账号的兑换页(带已保存会话), 经 noVNC 在网页里浏览/操作
+function doRedeem(index) {
+  var email = '#' + index;
+  for (var i = 0; i < accountsCache.length; i++) if (accountsCache[i].index === index) email = accountsCache[i].email;
+  if (!confirm('为 ' + email + ' 打开兑换页?将用该账号已保存的会话在容器内浏览器打开 rewards.bing.com/redeem, 你可以在弹窗里浏览和兑换; 结束时点「结束会话」(或等 20 分钟超时), cookie 会自动保存。需要该账号已有登录会话。')) return;
+  openMlSession(index, 'redeem');
+}
+function openMlSession(index, mode) {
+  fetch(API.manualLogin, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accountIndex: index, mode: mode || 'login' }) })
     .then(function (r) { return r.json(); })
     .then(function (d) {
       if (d && d.error) { alert(d.error); return; }
-      $('mlEmail').textContent = d.email;
+      $('mlEmail').textContent = (d.mode === 'redeem' ? '🛒 ' : '') + d.email;
       $('mlFrame').src = '/manual-vnc/' + d.token + '/vnc.html?path=' + encodeURIComponent('manual-vnc/' + d.token + '/websockify') + '&autoconnect=true&resize=scale';
       var dlg = $('mlModal');
       if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');

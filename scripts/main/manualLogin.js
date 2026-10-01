@@ -71,6 +71,8 @@ Options:
   --email       Optional named form of the account email.
   --platform    Session to create. Defaults to mobile; "both" opens them sequentially.
   --fresh       Do not restore existing cookies. An enabled saved fingerprint is still reused.
+  --redeem      Browse the rewards redeem page with the saved session (no login flow);
+                stays open until terminated, cookies are saved on exit.
   --help        Show this help.
 
 Examples:
@@ -275,6 +277,103 @@ function saveManualSession(dbPath, email, platform, storageState, fingerprint, p
     } catch {}
 }
 
+// 兑换页浏览会话(--redeem): 用已保存的账号会话直接打开 rewards 兑换页,
+// 供经 noVNC 在网页里浏览/操作; 进程挂起直到 SIGTERM(由看板结束/超时触发),
+// 退出前把容器内浏览器的最新 cookie 回写会话库(兑换操作可能刷新 cookie)
+async function runRedeem({ account, config, dbPath }) {
+    let platform = null
+    let stored = null
+    for (const candidate of ['desktop', 'mobile']) {
+        const s = loadStoredSession(dbPath, account.email, candidate, false)
+        if (s?.storageState?.cookies?.length) { platform = candidate; stored = s; break }
+    }
+    if (!platform) {
+        throw new Error(`No saved session for ${account.email}; run the account once or use manual login first`)
+    }
+
+    const isMobile = platform === 'mobile'
+    const locale = resolveLocale(account, stored.resolvedCountry)
+    const savesFingerprint = isMobile ? account.saveFingerprint.mobile : account.saveFingerprint.desktop
+    const canReuseFingerprint =
+        savesFingerprint && stored.fingerprint && fingerprintMatchesLocale(stored.fingerprint, locale)
+    const fingerprint = canReuseFingerprint ? stored.fingerprint : createFingerprint(isMobile, locale)
+    const screen = fingerprint.fingerprint.screen
+    const proxy = buildProxyConfig(account)
+    const runningAsRoot = typeof process.getuid === 'function' && process.getuid() === 0
+    const sandboxArgs =
+        process.platform === 'linux' && runningAsRoot ? ['--no-sandbox', '--disable-setuid-sandbox'] : []
+    const ignoreCertificateErrors = Boolean(proxy && config.proxy?.ignoreCertificateErrors)
+    const globalTimeout = resolveGlobalTimeoutMs(config.globalTimeout)
+    const certArgs = ignoreCertificateErrors
+        ? ['--ignore-certificate-errors', '--ignore-certificate-errors-spki-list', '--ignore-ssl-errors']
+        : []
+
+    const browser = await chromium.launch({
+        headless: false,
+        ...(proxy ? { proxy } : {}),
+        args: [...BROWSER_ARGS, ...sandboxArgs, ...certArgs]
+    })
+    let context = null
+
+    let interrupted = false
+    let finish = null
+    const stop = async signal => {
+        if (interrupted) return
+        interrupted = true
+        log('WARN', `${signal} received; saving redeem session before close`)
+        try {
+            const storageState = context ? await context.storageState() : null
+            if (storageState?.cookies?.length) {
+                saveManualSession(dbPath, account.email, platform, storageState, fingerprint, savesFingerprint)
+                log('SUCCESS', `Saved ${platform} session for ${account.email} | cookies=${storageState.cookies.length}`)
+            } else {
+                log('WARN', 'Browser had no cookies at close; keeping stored session unchanged')
+            }
+        } catch (error) {
+            log('WARN', `Failed to save redeem session: ${error.message}`)
+        }
+        await browser.close().catch(() => {})
+        if (finish) finish()
+    }
+    const onSigInt = () => void stop('SIGINT')
+    const onSigTerm = () => void stop('SIGTERM')
+    process.once('SIGINT', onSigInt)
+    process.once('SIGTERM', onSigTerm)
+
+    try {
+        const injected = await newInjectedContext(browser, {
+            fingerprint,
+            newContextOptions: {
+                permissions: [],
+                ignoreHTTPSErrors: ignoreCertificateErrors,
+                storageState: stored.storageState,
+                ...(isMobile
+                    ? {
+                          isMobile: true,
+                          hasTouch: true,
+                          deviceScaleFactor: screen.devicePixelRatio,
+                          viewport: { width: screen.width, height: screen.height },
+                          screen: { width: screen.width, height: screen.height }
+                      }
+                    : {})
+            }
+        })
+        context = injected
+        context.setDefaultTimeout(globalTimeout)
+        const page = await context.newPage()
+        await page.goto('https://rewards.bing.com/redeem', { waitUntil: 'domcontentloaded', timeout: globalTimeout }).catch(error => {
+            log('WARN', `Redeem navigation did not finish cleanly: ${error.message}`)
+        })
+        log('INFO', `Redeem page opened for ${account.email} (${platform}); browse/operate in the browser window`)
+        log('INFO', 'Session ends via the dashboard (结束按钮/超时) or Ctrl+C; cookies will be saved on exit')
+        await new Promise(resolve => { finish = resolve })
+    } finally {
+        process.removeListener('SIGINT', onSigInt)
+        process.removeListener('SIGTERM', onSigTerm)
+        if (!interrupted) await stop('cleanup')
+    }
+}
+
 async function runPlatform({ account, config, dbPath, platform, fresh }) {
     const isMobile = platform === 'mobile'
     const stored = loadStoredSession(dbPath, account.email, platform, fresh)
@@ -386,13 +485,13 @@ async function runPlatform({ account, config, dbPath, platform, fresh }) {
 }
 
 async function main() {
-    const args = parseArgs(process.argv.slice(2), { boolean: ['fresh', 'help', 'h'] })
+    const args = parseArgs(process.argv.slice(2), { boolean: ['fresh', 'redeem', 'help', 'h'] })
     if (args.help || args.h) {
         printHelp()
         return
     }
 
-    const unknownOptions = findUnknownOptions(args, ['email', 'platform', 'fresh', 'help', 'h'])
+    const unknownOptions = findUnknownOptions(args, ['email', 'platform', 'fresh', 'redeem', 'help', 'h'])
     if (unknownOptions.length) {
         failUsage(
             `Unknown option${unknownOptions.length === 1 ? '' : 's'}: ${unknownOptions.map(v => `--${v}`).join(', ')}`
@@ -422,6 +521,13 @@ async function main() {
     }
 
     const { dbPath } = getSessionDbPath(projectRoot, config.sessionPath)
+
+    // 兑换页浏览模式: 用已存会话打开 /redeem, 挂起直到被结束(信号), 退出前回写 cookie
+    if (args.redeem === true) {
+        await runRedeem({ account, config, dbPath })
+        log('SUCCESS', `Redeem session ended for ${account.email}`)
+        return
+    }
 
     log('INFO', `Configuration loaded from config.json | CONFIG_* overrides=${appliedConfigOverrides.length}`)
     if (config.headless) {
