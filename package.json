@@ -20,6 +20,8 @@
         "lint": "eslint .",
         "lint:fix": "eslint . --fix",
         "test:log-parser": "node --test scripts/api/logParser.test.js",
+        "test:accounts": "node --test scripts/api/accounts.test.js",
+        "test:load-accounts": "node -r ts-node/register/transpile-only --test scripts/tests/loadAccountsSelection.test.cjs",
         "format": "prettier --write .",
         "format:check": "prettier --check .",
         "clear-diagnostics": "rimraf diagnostics",

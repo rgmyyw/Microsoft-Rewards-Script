@@ -22,6 +22,11 @@ const apiProjectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 const EXTRA_BASE_INDEX = 901
 const extraCache = new Map()
 
+// 选号运行(单账号/排除名单)时写入子进程 env 的内部标记: 子进程 loadAccounts()
+// 看到它就跳过 config/accounts.json 动态账号合并, 否则被排除的动态账号会在
+// 运行进程里被重新追加, 定向跑退化为全量跑(2026-10-14 修复)
+export const ACCOUNTS_DYNAMIC_DISABLED_FLAG = { ACCOUNTS_DYNAMIC_DISABLED: '1' }
+
 function extraAccountEnvVars(entry, index) {
     const prefix = `ACCOUNT_${index}_`
     const env = { [`${prefix}EMAIL`]: entry.email }
@@ -29,6 +34,7 @@ function extraAccountEnvVars(entry, index) {
     if (entry.geoLocale) env[`${prefix}GEO_LOCALE`] = entry.geoLocale
     if (entry.langCode) env[`${prefix}LANG_CODE`] = entry.langCode
     if (entry.totpSecret) env[`${prefix}TOTP_SECRET`] = entry.totpSecret
+    if (entry.recoveryEmail) env[`${prefix}RECOVERY_EMAIL`] = entry.recoveryEmail
     return env
 }
 
@@ -117,7 +123,7 @@ export function buildSingleAccountEnv(accountIndex, sourceEnv = process.env) {
         for (const key of Object.keys(sourceEnv)) {
             if (/^ACCOUNT_\d+_/.test(key)) env[key] = ''
         }
-        Object.assign(env, extraAccountEnvVars(entry, 1))
+        Object.assign(env, extraAccountEnvVars(entry, 1), ACCOUNTS_DYNAMIC_DISABLED_FLAG)
         return { env, account: { index, email: entry.email } }
     }
 
@@ -140,6 +146,8 @@ export function buildSingleAccountEnv(accountIndex, sourceEnv = process.env) {
         const suffix = key.slice(selectedPrefix.length)
         env[`ACCOUNT_1_${suffix}`] = value
     }
+
+    Object.assign(env, ACCOUNTS_DYNAMIC_DISABLED_FLAG)
 
     return {
         env,
@@ -200,6 +208,8 @@ export function buildExcludedAccountsEnv(excludedAccountIndexes, sourceEnv = pro
             env[`${targetPrefix}${key.slice(sourcePrefix.length)}`] = value
         }
     })
+
+    Object.assign(env, ACCOUNTS_DYNAMIC_DISABLED_FLAG)
 
     return {
         env,

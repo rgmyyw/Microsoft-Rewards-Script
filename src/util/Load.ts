@@ -192,26 +192,32 @@ export function loadAccounts(): Account[] {
 
         // Dashboard-managed extras act as an override layer: same email patches
         // the env account (e.g. password rotation), otherwise it is appended.
-        const extras = loadExtraAccounts()
-        const removed = new Set(loadExtraRemovedEmails())
-        const kept: Account[] = []
-        for (const account of accounts) {
-            if (removed.has(account.email.toLowerCase())) continue
-            const override = extras.find(e => e.email.toLowerCase() === account.email.toLowerCase())
-            if (override) {
-                if (override.password) account.password = override.password
-                if (override.geoLocale) account.geoLocale = override.geoLocale
-                if (override.langCode) account.langCode = override.langCode
-                if (override.totpSecret) account.totpSecret = override.totpSecret
-                if (override.recoveryEmail) account.recoveryEmail = override.recoveryEmail
+        // Selection runs (single-account / excluded-list) bake the exact roster
+        // into env and set ACCOUNTS_DYNAMIC_DISABLED=1; merging here would
+        // re-append the excluded dynamic accounts and turn the targeted run
+        // into a full run.
+        if (!envBool('ACCOUNTS_DYNAMIC_DISABLED', false)) {
+            const extras = loadExtraAccounts()
+            const removed = new Set(loadExtraRemovedEmails())
+            const kept: Account[] = []
+            for (const account of accounts) {
+                if (removed.has(account.email.toLowerCase())) continue
+                const override = extras.find(e => e.email.toLowerCase() === account.email.toLowerCase())
+                if (override) {
+                    if (override.password) account.password = override.password
+                    if (override.geoLocale) account.geoLocale = override.geoLocale
+                    if (override.langCode) account.langCode = override.langCode
+                    if (override.totpSecret) account.totpSecret = override.totpSecret
+                    if (override.recoveryEmail) account.recoveryEmail = override.recoveryEmail
+                }
+                kept.push(account)
             }
-            kept.push(account)
-        }
-        accounts.length = 0
-        accounts.push(...kept)
-        for (const extra of extras) {
-            if (!accounts.some(a => a.email.toLowerCase() === extra.email.toLowerCase())) {
-                accounts.push(extra)
+            accounts.length = 0
+            accounts.push(...kept)
+            for (const extra of extras) {
+                if (!accounts.some(a => a.email.toLowerCase() === extra.email.toLowerCase())) {
+                    accounts.push(extra)
+                }
             }
         }
 
