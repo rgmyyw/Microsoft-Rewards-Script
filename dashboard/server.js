@@ -2381,6 +2381,20 @@ const HTML = `<!DOCTYPE html>
   .chart-scroll svg { display: block; }
   .legend { display: flex; gap: 14px; font-size: 11.5px; color: var(--muted); margin-top: 6px; flex-wrap: wrap; }
   .legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+  #trendLegend { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 10px; align-items: center; }
+  .lchip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; font-size: 11.5px; color: var(--muted); cursor: pointer; background: none; transition: all .12s; }
+  .lchip b { font-weight: 600; color: var(--text); }
+  .lchip:hover { border-color: var(--border-hi); color: var(--text); }
+  .lchip.active { border-color: var(--acc-glow); background: var(--acc-dim); color: var(--acc); }
+  .lchip.active b { color: var(--acc); }
+  .lchip .sw { width: 9px; height: 9px; border-radius: 3px; flex-shrink: 0; }
+  .trend-tip { position: fixed; z-index: 200; pointer-events: none; background: var(--card); border: 1px solid var(--border-hi); border-radius: 10px; box-shadow: var(--shadow-pop); padding: 8px 12px; font-size: 12px; line-height: 1.7; min-width: 150px; }
+  .trend-tip .tt-date { font-weight: 700; margin-bottom: 2px; }
+  .trend-tip .tt-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .trend-tip .tt-row b { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .trend-tip .sw { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+  .trend-tip .tt-total { color: var(--ok); font-weight: 700; }
+  .trend-tip .tt-bal { color: var(--muted); border-top: 1px solid var(--border); margin-top: 3px; padding-top: 3px; }
 
   /* ===== 历史 ===== */
   table.hist { width: 100%; border-collapse: collapse; font-size: 12.5px; }
@@ -2524,13 +2538,18 @@ const HTML = `<!DOCTYPE html>
   <section class="panel">
     <div class="panel-h">
       <h2>📈 积分趋势</h2>
-      <span class="sub" id="trendSub">加载中…</span>
-      <div class="legend">
-        <span><span class="sw" style="background:var(--acc)"></span>每日获得(左轴)</span>
-        <span><span class="sw" style="background:var(--ok)"></span>总余额走势(右轴, 相对缩放)</span>
+      <div class="chips" style="gap:6px">
+        <button class="chip" data-tr="7" onclick="setTrendRange(7)">7 天</button>
+        <button class="chip active" data-tr="15" onclick="setTrendRange(15)">15 天</button>
+        <button class="chip" data-tr="30" onclick="setTrendRange(30)">30 天</button>
       </div>
+      <span class="sub" id="trendSub">加载中…</span>
     </div>
-    <div class="chart-scroll" id="trendChart"><div class="empty">暂无趋势数据</div></div>
+    <div style="position:relative">
+      <div class="chart-scroll" id="trendChart"><div class="empty">暂无趋势数据</div></div>
+      <div id="trendTip" class="trend-tip" style="display:none"></div>
+    </div>
+    <div id="trendLegend"></div>
   </section>
 
   <div class="foot">数据来源: microsoft-rewards-script 容器 API · <span id="footRefresh">每 15 秒自动刷新</span> · ms-rewards-dashboard</div>
@@ -3234,13 +3253,18 @@ function updateSelUi() {
   sa.indeterminate = n > 0 && n < visN;
 }
 
-// ---- 趋势图(纯 SVG 手绘, 无第三方库) ----
+// ---- 趋势图(纯 SVG 手绘: 按账号堆叠柱 + 总余额线 + 浮动明细 + 图例隔离) ----
 var trendsData = null;
+var trendRange = 15;
+var trendIsolated = '';
+var trendAccounts = []; // [{email, label, color, sum}] 颜色按字母序稳定分配, 图例按区间合计排序
+var trendDays = [];     // 当前渲染的窗口数据(供 tooltip 取用)
+var ACCOUNT_PALETTE = ['#4e9cff', '#3ecf8e', '#f0b429', '#c792ea', '#f78fb3', '#2dd4bf', '#ff9f6e', '#8ab4f8'];
 function loadTrends() {
   apiFetch(API.trends, null, 8000).then(function (d) {
     trendsData = d && d.days ? d.days : [];
-    renderTrendsChart();
     renderSpark();
+    renderTrendsChart();
   }).catch(function () { $('trendSub').textContent = '趋势数据加载失败'; });
 }
 function themeColor(dark, light) {
@@ -3267,12 +3291,89 @@ function renderSpark() {
   el.innerHTML = '<path d="' + path + '" fill="none" stroke="' + acc + '" stroke-width="1.6" stroke-linecap="round" opacity=".85"/>'
     + '<circle cx="' + lastX.toFixed(1) + '" cy="' + lastY.toFixed(1) + '" r="2.4" fill="' + acc + '"/>';
 }
+function setTrendRange(n) {
+  trendRange = n;
+  var chips = document.querySelectorAll('.chip[data-tr]');
+  for (var i = 0; i < chips.length; i++) chips[i].className = 'chip' + (chips[i].getAttribute('data-tr') === String(n) ? ' active' : '');
+  renderTrendsChart();
+}
+function buildTrendAccounts() {
+  var days = trendsData.slice(-trendRange);
+  var sums = {};
+  for (var i = 0; i < days.length; i++) {
+    var be = days[i].byEmail || {};
+    for (var em in be) sums[em] = (sums[em] || 0) + (be[em] || 0);
+  }
+  var emails = Object.keys(sums).sort();
+  trendAccounts = [];
+  for (var j = 0; j < emails.length; j++) {
+    trendAccounts.push({ email: emails[j], label: String(emails[j]).split('@')[0], color: ACCOUNT_PALETTE[j % ACCOUNT_PALETTE.length], sum: sums[emails[j]] || 0 });
+  }
+  trendAccounts.sort(function (a, b) { return b.sum - a.sum; }); // 图例按合计降序
+}
+function toggleTrendIso(email) {
+  trendIsolated = (trendIsolated === email) ? '' : email;
+  renderTrendsChart();
+}
+function renderTrendLegend() {
+  var host = $('trendLegend');
+  if (!host) return;
+  var html = '';
+  for (var i = 0; i < trendAccounts.length; i++) {
+    var a = trendAccounts[i];
+    var active = trendIsolated === a.email ? ' active' : '';
+    html += '<button class="lchip' + active + '" title="点击只看该账号/再点恢复" onclick="toggleTrendIso(&quot;' + esc(a.email) + '&quot;)">'
+      + '<span class="sw" style="background:' + a.color + '"></span>' + esc(a.label) + ' <b>+' + fmtNum(a.sum) + '</b></button>';
+  }
+  html += '<span class="ts" style="margin-left:4px">绿线=总余额(右轴, 相对缩放)</span>';
+  host.innerHTML = html;
+}
+function trendTipHtml(d) {
+  var html = '<div class="tt-date">' + d.date + (d.date === (trendDays[trendDays.length - 1] || {}).date ? '(今天)' : '') + '</div>';
+  html += '<div class="tt-row"><span>当日获得</span><b class="tt-total">+' + fmtNum(d.total) + '</b></div>';
+  var rows = [];
+  var be = d.byEmail || {};
+  for (var i = 0; i < trendAccounts.length; i++) {
+    var a = trendAccounts[i];
+    var g = be[a.email] || 0;
+    if (g <= 0) continue;
+    rows.push({ a: a, g: g });
+  }
+  rows.sort(function (x, y) { return y.g - x.g; });
+  for (var k = 0; k < rows.length; k++) {
+    var dim = (trendIsolated && rows[k].a.email !== trendIsolated) ? ' opacity:.45' : '';
+    var bold = trendIsolated === rows[k].a.email ? ' style="font-weight:700"' : '';
+    html += '<div class="tt-row" style="' + (dim ? dim + ';' : '') + '"><span class="sw" style="background:' + rows[k].a.color + '"></span><span' + (bold ? bold : '') + '>' + esc(rows[k].a.label) + '</span><b>+' + fmtNum(rows[k].g) + '</b></div>';
+  }
+  if (!rows.length) html += '<div class="tt-row" style="color:var(--muted)">当日无运行记录</div>';
+  if (d.balance != null) html += '<div class="tt-row tt-bal"><span>当日总余额</span><b>' + fmtNum(d.balance) + '</b></div>';
+  return html;
+}
+function trendMove(evt, idx) {
+  var tip = $('trendTip');
+  if (!tip || !trendDays[idx]) return;
+  tip.innerHTML = trendTipHtml(trendDays[idx]);
+  tip.style.display = 'block';
+  var tw = tip.offsetWidth, th = tip.offsetHeight;
+  var x = evt.clientX + 14;
+  if (x + tw > window.innerWidth - 8) x = evt.clientX - tw - 14;
+  var y = evt.clientY + 14;
+  if (y + th > window.innerHeight - 8) y = evt.clientY - th - 14;
+  tip.style.left = x + 'px';
+  tip.style.top = y + 'px';
+}
+function trendLeave() {
+  var tip = $('trendTip');
+  if (tip) tip.style.display = 'none';
+}
 function renderTrendsChart() {
   var host = $('trendChart');
   if (!host) return;
-  if (!trendsData || trendsData.length < 2) { host.innerHTML = '<div class="empty">暂无趋势数据(运行几轮后自动生成)</div>'; $('trendSub').textContent = ''; return; }
-  var days = trendsData.slice(-21);
-  var W = Math.max(680, days.length * 46), H = 190, padL = 44, padR = 56, padT = 18, padB = 30;
+  if (!trendsData || trendsData.length < 2) { host.innerHTML = '<div class="empty">暂无趋势数据(运行几轮后自动生成)</div>'; $('trendSub').textContent = ''; $('trendLegend').innerHTML = ''; return; }
+  buildTrendAccounts();
+  trendDays = trendsData.slice(-trendRange);
+  var days = trendDays;
+  var W = Math.max(680, days.length * 52), H = 210, padL = 44, padR = 56, padT = 16, padB = 28;
   var iw = W - padL - padR, ih = H - padT - padB;
   var mx = 10;
   for (var i = 0; i < days.length; i++) if (days[i].total > mx) mx = days[i].total;
@@ -3281,56 +3382,58 @@ function renderTrendsChart() {
   for (var j = 0; j < days.length; j++) if (days[j].balance != null) bals.push(days[j].balance);
   var bmn = bals.length ? Math.min.apply(null, bals) : 0, bmx = bals.length ? Math.max.apply(null, bals) : 1;
   if (bmx === bmn) bmx = bmn + 1;
-  var bw = Math.min(22, iw / days.length * 0.52);
+  var bw = Math.min(24, iw / days.length * 0.56);
   var gap = iw / days.length;
   var cGrid = themeColor('#1f2a3a', '#e2e8f0');
   var cText = themeColor('#8a9ab0', '#5f6f85');
-  var cBar = themeColor('#52a8ff', '#0f7adb');
-  var cBarToday = themeColor('#7cc1ff', '#3b9eff');
   var cLine = themeColor('#3ecf8e', '#0e9f6e');
   var svg = '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" role="img">';
-  // 网格 + 左轴刻度
   for (var g = 0; g <= 4; g++) {
     var gy = padT + ih - (ih * g / 4);
     svg += '<line x1="' + padL + '" y1="' + gy.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + gy.toFixed(1) + '" stroke="' + cGrid + '" stroke-width="1"/>';
     svg += '<text x="' + (padL - 6) + '" y="' + (gy + 3.5).toFixed(1) + '" text-anchor="end" font-size="10" fill="' + cText + '">' + Math.round(mx * g / 4) + '</text>';
+    if (bals.length && g % 2 === 0) {
+      svg += '<text x="' + (W - padR + 6) + '" y="' + (gy + 3.5).toFixed(1) + '" font-size="9.5" fill="' + cLine + '" opacity=".75">' + fmtNum(bmn + (bmx - bmn) * g / 4) + '</text>';
+    }
   }
   var today = days[days.length - 1].date;
   var line = '';
   var started = false;
+  var stepX = Math.max(1, Math.ceil(days.length / 8));
   for (var k = 0; k < days.length; k++) {
     var d = days[k];
     var cx = padL + gap * k + gap / 2;
-    var bh = d.total > 0 ? Math.max(2, (d.total / mx) * ih) : 0;
     var isToday = d.date === today;
-    var tip = d.date + (isToday ? '(今天)' : '') + ' · 获得 +' + fmtNum(d.total);
-    var per = [];
-    var ems = Object.keys(d.byEmail || {});
-    for (var e = 0; e < ems.length; e++) if (d.byEmail[ems[e]] > 0) per.push(ems[e].split('@')[0] + ' +' + d.byEmail[ems[e]]);
-    if (per.length) tip += '\\n' + per.join('  ');
-    if (d.balance != null) tip += '\\n总余额 ' + fmtNum(d.balance);
-    if (bh > 0) svg += '<rect x="' + (cx - bw / 2).toFixed(1) + '" y="' + (padT + ih - bh).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + bh.toFixed(1) + '" rx="3" fill="' + (isToday ? cBarToday : cBar) + '" opacity="' + (isToday ? 1 : .8) + '"><title>' + esc(tip) + '</title></rect>';
-    svg += '<rect x="' + (cx - gap / 2).toFixed(1) + '" y="' + padT + '" width="' + gap.toFixed(1) + '" height="' + ih + '" fill="transparent"><title>' + esc(tip) + '</title></rect>';
+    // 堆叠柱: 按稳定账号顺序自下而上
+    var yCur = padT + ih;
+    var be = d.byEmail || {};
+    for (var ai = 0; ai < trendAccounts.length; ai++) {
+      var acc = trendAccounts[ai];
+      var gv = be[acc.email] || 0;
+      if (gv <= 0) continue;
+      var segH = Math.max(2, (gv / mx) * ih);
+      yCur -= segH;
+      var op = (trendIsolated && trendIsolated !== acc.email) ? 0.18 : 0.88;
+      svg += '<rect x="' + (cx - bw / 2).toFixed(1) + '" y="' + yCur.toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + segH.toFixed(1) + '" rx="2.5" fill="' + acc.color + '" opacity="' + op + '"/>';
+    }
+    // 悬停命中区(整列)
+    svg += '<rect x="' + (cx - gap / 2).toFixed(1) + '" y="' + padT + '" width="' + gap.toFixed(1) + '" height="' + ih + '" fill="transparent" onmousemove="trendMove(event, ' + k + ')" onmouseleave="trendLeave()"/>';
     if (d.balance != null) {
       var ly = padT + ih - ((d.balance - bmn) / (bmx - bmn)) * ih;
       line += (started ? ' L' : 'M') + cx.toFixed(1) + ' ' + ly.toFixed(1);
       started = true;
     }
-    if (days.length <= 10 || k % Math.ceil(days.length / 8) === 0 || isToday) {
-      svg += '<text x="' + cx.toFixed(1) + '" y="' + (H - 9) + '" text-anchor="middle" font-size="9.5" fill="' + cText + '">' + d.date.slice(5) + '</text>';
+    if (days.length <= 10 || k % stepX === 0 || isToday) {
+      svg += '<text x="' + cx.toFixed(1) + '" y="' + (H - 9) + '" text-anchor="middle" font-size="9.5" fill="' + (isToday ? themeColor('#52a8ff', '#0f7adb') : cText) + '"' + (isToday ? ' font-weight="700"' : '') + '>' + d.date.slice(5) + '</text>';
     }
   }
   if (started) svg += '<path d="' + line + '" fill="none" stroke="' + cLine + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" opacity=".9"/>';
-  // 右轴余额首尾标注
-  if (bals.length) {
-    svg += '<text x="' + (W - padR + 6) + '" y="' + (padT + 8) + '" font-size="10" fill="' + cLine + '">' + fmtNum(bmx) + '</text>';
-    svg += '<text x="' + (W - padR + 6) + '" y="' + (padT + ih) + '" font-size="10" fill="' + cLine + '">' + fmtNum(bmn) + '</text>';
-  }
   svg += '</svg>';
   host.innerHTML = svg;
+  renderTrendLegend();
   var sum7 = 0;
-  for (var s = Math.max(0, days.length - 7); s < days.length; s++) sum7 += (days[s].total || 0);
-  $('trendSub').textContent = '近 ' + days.length + ' 天 · 近 7 天共 +' + fmtNum(sum7) + ' 分(悬停柱体看每日明细)';
+  for (var s2 = Math.max(0, days.length - 7); s2 < days.length; s2++) sum7 += (days[s2].total || 0);
+  $('trendSub').textContent = '近 ' + days.length + ' 天 · 共 +' + fmtNum(days.reduce(function (s, x) { return s + (x.total || 0); }, 0)) + ' 分(悬停看明细, 点图例单看某账号)';
 }
 </script>
 <script>
