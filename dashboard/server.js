@@ -826,6 +826,48 @@ function taskSyncCatchup(trigger) {
 setInterval(() => { try { taskSyncCatchup('periodic-30min'); } catch (e) { /* ignore */ } }, 30 * 60 * 1000);
 setInterval(() => { void marketCatchup('periodic-30min'); }, 30 * 60 * 1000);
 
+// ==== 每日摘要推送(21:30 Asia/Shanghai, 开关在推送设置 ev-dailySummary) ====
+// 组装当日各账号获得/余额/错误一览; 21:30 每天只发一次(进程内去重, 跨重启由当日已过点自然兜底)
+function buildDailySummaryLines() {
+  const t = todayStr();
+  const lines = ['📊 MS-Rewards 每日摘要 ' + t];
+  let total = 0;
+  const ems = Object.keys(state.accounts).filter(em => em && em.indexOf('@') > 0);
+  for (const em of ems) {
+    const a = state.accounts[em];
+    if (!a) continue;
+    const byBal = (a.dayStartDate === t && a.dayStartBalance != null && a.balance != null) ? a.balance - a.dayStartBalance : null;
+    const gain = byBal != null ? byBal : (a.todayCollected || 0);
+    total += gain;
+    const flag = (a.lastStatus === 'failed' || a.lastError) ? '⚠️ ' : '';
+    lines.push(flag + em.split('@')[0] + ': +' + gain + (a.balance != null ? ' (余额 ' + a.balance + ')' : '') + (a.lastError ? ' | ' + String(a.lastError).slice(0, 60) : ''));
+  }
+  const bal = Object.values(state.accounts).reduce((s, a) => s + (a && a.balance ? a.balance : 0), 0);
+  lines.push('今日合计 +' + total + ' · 总余额 ' + bal + ' · 账号 ' + ems.length + ' 个');
+  return lines;
+}
+let dailySummarySentDate = null;
+setInterval(() => {
+  try {
+    const ev = (pushConfig.events || {}).dailySummary;
+    if (!ev || !ev.enabled) return;
+    const now = new Date(Date.now() + 8 * 3600e3);
+    const hm = now.toISOString().slice(11, 16);
+    const d = now.toISOString().slice(0, 10);
+    if (hm < '21:30' || dailySummarySentDate === d) return;
+    dailySummarySentDate = d;
+    const lines = buildDailySummaryLines();
+    if (pushConfig.dingtalk.enabled && pushConfig.dingtalk.accessToken) {
+      sendDingTalk('[' + (pushConfig.dingtalk.keyword || 'MS-Rewards') + '] ' + lines.join('\n')).then(r => {
+        log('INFO', (r.ok ? '✓' : '✗') + ' 每日摘要钉钉 -> ' + (r.resp ? r.resp.slice(0, 100) : 'ok'));
+      });
+    }
+    if (emailReady()) {
+      sendEventEmail(lines).then(r => log('INFO', (r.ok ? '✓' : '✗') + ' 每日摘要邮件 -> ' + (r.ok ? pushConfig.email.to : (r.error || '失败'))));
+    }
+  } catch (e) { log('ERROR', '每日摘要推送失败: ' + e.message); }
+}, 30000);
+
 // ==== 任务未完成自动补跑(每日最多一次) ====
 // 数据同步完成后检测: 有实测数据的账号未全部通过, 或无明细账号当日积分低于阈值
 // → 只对未完成的账号自动发起一次补跑(其余账号加入排除列表)。仅北京时间 7~21 点之间发起(凌晨静默, AUTO_RETRY_FIRST_HOUR 可覆盖)。
@@ -1430,6 +1472,66 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    if (p === '/api/trends') {
+      // 趋势聚合: state.runs(30 轮) 按天汇总每日获得与当日末总余额, 今日以实时口径覆盖
+      const byDay = new Map();
+      const lastBal = {};
+      const runs = (state.runs || []).slice().reverse(); // 旧 → 新
+      for (const r of runs) {
+        const ts = r && (r.endedAt || r.startedAt);
+        if (!ts) continue;
+        const d = new Date(ts + 8 * 3600e3).toISOString().slice(0, 10);
+        let day = byDay.get(d);
+        if (!day) { day = { date: d, byEmail: {}, total: 0, balance: null }; byDay.set(d, day); }
+        for (const ra of (r.accounts || [])) {
+          if (!ra || !ra.email) continue;
+          day.byEmail[ra.email] = (day.byEmail[ra.email] || 0) + (ra.gained || 0);
+          if (ra.balance != null && ra.balance > 0) lastBal[ra.email] = ra.balance;
+        }
+        day.total = Object.keys(day.byEmail).reduce((s, em) => s + day.byEmail[em], 0);
+        const bal = Object.keys(lastBal).reduce((s, em) => s + lastBal[em], 0);
+        if (bal > 0) day.balance = bal;
+      }
+      // 今日实时(余额接口口径优先, 与总览一致), 覆盖 runs 里今天的部分轮次
+      const t = todayStr();
+      const todayBy = {};
+      let todayTotal = 0;
+      for (const em of Object.keys(state.accounts)) {
+        const a = state.accounts[em];
+        const byBal = (a.dayStartDate === t && a.dayStartBalance != null && a.balance != null) ? a.balance - a.dayStartBalance : null;
+        const g = byBal != null ? byBal : (a.todayCollected || 0);
+        if (g > 0) { todayBy[em] = g; todayTotal += g; }
+      }
+      let td = byDay.get(t);
+      if (!td) { td = { date: t, byEmail: {}, total: 0, balance: null }; byDay.set(t, td); }
+      td.byEmail = todayBy;
+      td.total = todayTotal;
+      const curBal = Object.values(state.accounts).reduce((s, a) => s + (a.balance || 0), 0);
+      if (curBal > 0) td.balance = curBal;
+      // 补齐日期空洞(无运行的日子记 0), 最多回看 60 天
+      const sorted = [...byDay.values()].sort((a, b) => (a.date < b.date ? -1 : 1));
+      const out = [];
+      if (sorted.length) {
+        const map = new Map(sorted.map(x => [x.date, x]));
+        let cur = new Date(sorted[0].date + 'T00:00:00Z');
+        const end = new Date(t + 'T00:00:00Z');
+        let carryBal = null;
+        while (cur <= end && out.length < 60) {
+          const ds = cur.toISOString().slice(0, 10);
+          const d = map.get(ds);
+          if (d && d.balance != null) carryBal = d.balance;
+          out.push({
+            date: ds,
+            total: d ? d.total : 0,
+            byEmail: d ? d.byEmail : {},
+            balance: d && d.balance != null ? d.balance : carryBal,
+          });
+          cur = new Date(cur.getTime() + 86400000);
+        }
+      }
+      return json(res, 200, { days: out });
+    }
+
     if (p === '/api/push-config' && req.method === 'GET') {
       return json(res, 200, pushConfig);
     }
@@ -1561,7 +1663,6 @@ const server = http.createServer(async (req, res) => {
           todaySource: byBalance != null ? 'balance' : 'log',
           bonusCollected: st.bonusDate === t ? (st.bonusCollected || 0) : 0,
           tasksNA: st.tasksNA === t,
-          tasksNA: st.tasksNA === t,
           todayTasks: (st.tasks && st.tasks.date === t) ? st.tasks : null,
           validity: st.validity || null,
           liveCollected: (points && points.running && live.collected != null) ? live.collected : null,
@@ -1616,6 +1717,9 @@ const server = http.createServer(async (req, res) => {
           currentAccount: points.currentAccount, startedAt: points.startedAt,
           collected: points.collected, finished: points.finished,
           accountsTotal: points.accountsTotal,
+          // 运行进度: 本轮已收到完成事件的账号数(SSE 断连时回退 /points 的 done 计数)
+          doneCount: state.currentRun ? state.currentRun.accounts.length : liveAccounts.filter(x => x.done).length,
+          totalCount: points.accountsTotal || liveAccounts.length,
         } : null,
         accounts: all,
         summary: summary,
@@ -1908,161 +2012,355 @@ function postJson(apiPath, body) {
 // 注意: 本 HTML 位于反引号模板字符串内 —— 内联 JS 禁用反引号/模板插值/${ 与反斜杠转义(含正则与 \n),
 // 否则会被模板字面量二次解释导致下发页面语法错误(曾因此整页 JS 失效)。
 const HTML = `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
 <title>MS-Rewards 积分看板</title>
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem('msrTheme');
+    if (t !== 'dark' && t !== 'light') t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', t);
+  } catch (e) { /* 默认深色 */ }
+})();
+</script>
 <style>
-  :root { --ms-blue:#0078d4; --bg:#f3f5f7; --card:#ffffff; --text:#242424; --muted:#8a8f98; --ok:#107c10; --err:#d13438; --warn:#d28b00; --border:#e3e6ea; --radius:12px; }
+  /* ===== 设计令牌: 深色默认, 浅色覆盖 ===== */
+  :root {
+    --bg: #eef1f6; --bg-soft: #e6eaf1; --card: #ffffff; --card-hi: #f6f9fc;
+    --border: #dfe5ee; --border-hi: #c8d3e2;
+    --text: #1a2433; --muted: #5f6f85; --faint: #93a1b5;
+    --acc: #0f7adb; --acc-strong: #0a63b3; --acc-dim: rgba(15, 122, 219, .10); --acc-glow: rgba(15, 122, 219, .22);
+    --ok: #0e9f6e; --ok-dim: rgba(14, 159, 110, .12);
+    --err: #dc2626; --err-dim: rgba(220, 38, 38, .10);
+    --warn: #c2780a; --warn-dim: rgba(194, 130, 10, .12);
+    --bar-track: #e8edf4;
+    --shadow: 0 1px 2px rgba(23, 33, 46, .06), 0 2px 8px rgba(23, 33, 46, .04);
+    --shadow-pop: 0 12px 40px rgba(23, 33, 46, .18);
+    --topbar-bg: rgba(255, 255, 255, .82);
+    --code-bg: #0f1722; --code-fg: #cfe3d8; --code-err: #ffb4b4;
+  }
+  html[data-theme=dark] {
+    --bg: #0a0e14; --bg-soft: #0d1219; --card: #121926; --card-hi: #17202f;
+    --border: #1f2a3a; --border-hi: #2d3c52;
+    --text: #e7edf5; --muted: #8a9ab0; --faint: #5b6b81;
+    --acc: #52a8ff; --acc-strong: #7cc1ff; --acc-dim: rgba(82, 168, 255, .13); --acc-glow: rgba(82, 168, 255, .30);
+    --ok: #3ecf8e; --ok-dim: rgba(62, 207, 142, .13);
+    --err: #ff6b6b; --err-dim: rgba(255, 107, 107, .12);
+    --warn: #f0b429; --warn-dim: rgba(240, 180, 41, .13);
+    --bar-track: #1c2736;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .35), 0 2px 10px rgba(0, 0, 0, .22);
+    --shadow-pop: 0 18px 60px rgba(0, 0, 0, .55);
+    --topbar-bg: rgba(10, 14, 20, .78);
+    --code-bg: #0b1017; --code-fg: #cfe3d8; --code-err: #ffb4b4;
+  }
   * { box-sizing: border-box; }
-  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); }
-  .wrap { max-width:1180px; margin:0 auto; padding:18px 16px 50px; }
-  header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:14px; }
-  header h1 { font-size:20px; margin:0; display:flex; align-items:center; gap:8px; }
-  .logo { color:var(--ms-blue); }
-  .status-pill { font-size:12px; padding:4px 10px; border-radius:20px; background:#e5f1fb; color:var(--ms-blue); white-space:nowrap; }
-  .status-pill.running { background:#e6f4ea; color:var(--ok); }
-  .status-pill.error { background:#fdecea; color:var(--err); }
-  .toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-  .btn { border:0; border-radius:8px; padding:8px 16px; font-size:13px; cursor:pointer; background:var(--ms-blue); color:#fff; }
-  .btn.secondary { background:#eef1f4; color:var(--text); }
-  .btn.small { padding:5px 10px; font-size:12px; }
-  .btn:disabled { opacity:.5; cursor:not-allowed; }
-  .menu { position:relative; }
-  .menu-drop { position:absolute; right:0; top:calc(100% + 6px); background:var(--card); border:1px solid var(--border); border-radius:10px; box-shadow:0 6px 24px rgba(0,0,0,.12); padding:8px; min-width:240px; z-index:50; display:none; }
-  .menu-drop.show { display:block; }
-  .menu-item { display:flex; width:100%; text-align:left; padding:8px 10px; border:0; background:none; border-radius:8px; font-size:13px; cursor:pointer; align-items:center; gap:8px; color:var(--text); }
-  .menu-item:hover { background:#f0f4f8; }
-  .menu-sep { border-top:1px solid var(--border); margin:6px 4px; }
-  .menu-label { font-size:11px; color:var(--muted); padding:4px 10px 2px; }
-  .iv-row { display:flex; gap:6px; padding:4px 8px 8px; flex-wrap:wrap; }
-  .iv-btn { border:1px solid var(--border); background:#fff; border-radius:8px; padding:4px 10px; font-size:12px; cursor:pointer; color:var(--text); }
-  .iv-btn.active { background:var(--ms-blue); color:#fff; border-color:var(--ms-blue); }
-  .summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-bottom:12px; }
-  .card { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); padding:12px 16px; }
-  .sub { font-size:12px; color:var(--muted); }
-  .card .num { font-size:22px; font-weight:700; margin-top:2px; font-variant-numeric:tabular-nums; }
-  .selbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; background:var(--card); border:1px solid var(--border); border-radius:var(--radius); padding:8px 14px; margin-bottom:10px; font-size:13px; }
-  .selbar .grow { flex:1; }
-  .tblwrap { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); overflow:auto; max-height:58vh; }
-  table.acc { width:100%; min-width:780px; border-collapse:collapse; font-size:13px; }
-  table.acc th { position:sticky; top:0; background:#f8fafb; z-index:1; text-align:left; padding:9px 10px; border-bottom:1px solid var(--border); color:var(--muted); font-weight:500; white-space:nowrap; }
-  table.acc td { padding:8px 10px; border-bottom:1px solid #eef1f3; vertical-align:middle; }
-  table.acc tr:hover td { background:#f6f9fc; }
-  table.acc td.num, table.acc th.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
-  td.em { font-weight:600; word-break:break-all; min-width:180px; }
-  .ts { font-size:11px; color:var(--muted); font-weight:400; margin-top:1px; }
-  .badge { display:inline-block; font-size:11px; padding:2px 8px; border-radius:10px; background:#f0f2f4; color:var(--muted); white-space:nowrap; }
-  .badge.ok { background:#e6f4ea; color:var(--ok); }
-  .badge.err { background:#fdecea; color:var(--err); }
-  .badge.run { background:#fff4e0; color:var(--warn); }
-  .badge.progress { background:#e5f1fb; color:var(--ms-blue); }
-  .errbadge { display:inline-block; color:var(--err); border:1px solid var(--err); border-radius:999px; font-size:12px; line-height:1.6; padding:0 9px; cursor:pointer; white-space:nowrap; user-select:none; }
-  .errbadge:hover { background:rgba(220,80,80,.12); }
-  .hint { font-size:12px; color:var(--muted); margin-top:8px; line-height:1.6; }
-  .msg { padding:10px 14px; border-radius:8px; margin:10px 0; font-size:13px; display:none; }
-  .msg.show { display:block; }
-  .msg.err { background:#fdecea; color:var(--err); }
-  input[type=checkbox] { width:16px; height:16px; cursor:pointer; }
-  input[type=text], input[type=password] { width:100%; padding:8px 10px; border:1px solid var(--border); border-radius:8px; font-size:14px; margin-top:4px; }
-  .field { margin-bottom:12px; }
-  .field label { font-size:13px; color:var(--muted); }
-  .switch-row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 0; border-bottom:1px solid var(--border); }
-  .switch-row:last-child { border-bottom:0; }
-  .switch { position:relative; width:42px; height:24px; flex-shrink:0; }
-  .switch input { opacity:0; width:0; height:0; }
-  .slider { position:absolute; inset:0; background:#ccc; border-radius:24px; transition:.2s; cursor:pointer; }
-  .slider:before { content:""; position:absolute; width:18px; height:18px; left:3px; top:3px; background:#fff; border-radius:50%; transition:.2s; }
-  .switch input:checked + .slider { background:var(--ok); }
-  .switch input:checked + .slider:before { transform:translateX(18px); }
-  .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:10px 18px; }
-  @media (max-width:640px) { .grid-2 { grid-template-columns:1fr; } }
-  dialog { border:1px solid var(--border); border-radius:var(--radius); padding:20px; width:min(680px, 94vw); max-height:88vh; overflow:auto; }
-  dialog::backdrop { background:rgba(0,0,0,.35); }
-  dialog h2 { margin:0 0 14px; font-size:16px; }
-  dialog#mlModal { width:min(980px, 97vw); }
-  .rowact { white-space:nowrap; }
-  .rowact .btn { padding:3px 8px; font-size:12px; }
-  .btn.danger { background:var(--err); color:#fff; }
-  .pw-row { display:flex; align-items:center; gap:8px; }
-  .eye { border:0; background:#eef1f4; border-radius:8px; cursor:pointer; padding:8px 10px; font-size:14px; margin-top:4px; }
-  details.history { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); padding:12px 16px; margin-top:14px; }
-  details.history summary { cursor:pointer; font-size:14px; font-weight:600; }
-  table.hist { width:100%; border-collapse:collapse; font-size:12.5px; margin-top:10px; }
-  table.hist th, table.hist td { text-align:left; padding:6px 8px; border-bottom:1px solid #eef1f3; white-space:nowrap; }
-  table.hist th { color:var(--muted); font-weight:500; }
-  .foot { color:var(--muted); font-size:12px; text-align:center; margin-top:26px; }
-  .empty { color:var(--muted); padding:18px; text-align:center; }
+  html { scrollbar-color: var(--border-hi) transparent; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }
+  body::before { content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    background: radial-gradient(900px 420px at 82% -12%, var(--acc-dim), transparent 62%),
+                radial-gradient(700px 380px at -8% 108%, var(--ok-dim), transparent 60%); }
+  ::selection { background: var(--acc-glow); }
+
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 16px 18px 56px; }
+
+  /* ===== 顶栏 ===== */
+  .topbar { position: sticky; top: 0; z-index: 40; background: var(--topbar-bg); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border-bottom: 1px solid var(--border); }
+  .topbar-in { max-width: 1240px; margin: 0 auto; padding: 10px 18px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 10px; margin-right: auto; }
+  .brand .mark { width: 34px; height: 34px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 18px; color: #fff;
+    background: linear-gradient(135deg, #2f7ce0, #1b4f9c); box-shadow: inset 0 1px 0 rgba(255,255,255,.25), var(--shadow); }
+  .brand h1 { font-size: 16px; margin: 0; font-weight: 700; letter-spacing: .2px; }
+  .brand .sub { font-size: 11px; color: var(--muted); margin-top: 1px; }
+  .pill { font-size: 12px; padding: 4px 11px; border-radius: 999px; border: 1px solid var(--border); background: var(--card); color: var(--muted); white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
+  .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+  .pill.on { color: var(--ok); border-color: var(--ok-dim); background: var(--ok-dim); } .pill.on .dot { background: var(--ok); }
+  .pill.run { color: var(--acc); border-color: var(--acc-dim); background: var(--acc-dim); } .pill.run .dot { background: var(--acc); animation: pulse 1.6s ease-out infinite; }
+  .pill.err { color: var(--err); border-color: var(--err-dim); background: var(--err-dim); } .pill.err .dot { background: var(--err); }
+
+  .btn { border: 1px solid transparent; border-radius: 10px; padding: 8px 16px; font-size: 13px; cursor: pointer; background: var(--acc); color: #fff; font-weight: 600; transition: filter .15s, transform .06s, background .15s; }
+  .btn:hover { filter: brightness(1.08); } .btn:active { transform: translateY(1px); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; filter: none; }
+  .btn.secondary { background: var(--card); color: var(--text); border-color: var(--border-hi); font-weight: 500; }
+  .btn.secondary:hover { background: var(--card-hi); }
+  .btn.danger { background: var(--err); }
+  .btn.small { padding: 5px 11px; font-size: 12px; border-radius: 8px; }
+  .iconbtn { width: 36px; height: 36px; padding: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 16px; }
+
+  .menu { position: relative; }
+  .menu-drop { position: absolute; right: 0; top: calc(100% + 8px); background: var(--card); border: 1px solid var(--border-hi); border-radius: 12px; box-shadow: var(--shadow-pop); padding: 8px; min-width: 250px; z-index: 60; display: none; }
+  .menu-drop.show { display: block; }
+  .menu-item { display: flex; width: 100%; text-align: left; padding: 8px 10px; border: 0; background: none; border-radius: 8px; font-size: 13px; cursor: pointer; align-items: center; gap: 8px; color: var(--text); }
+  .menu-item:hover { background: var(--card-hi); }
+  .menu-sep { border-top: 1px solid var(--border); margin: 6px 4px; }
+  .menu-label { font-size: 11px; color: var(--muted); padding: 4px 10px 2px; }
+  .iv-row { display: flex; gap: 6px; padding: 4px 8px 8px; flex-wrap: wrap; }
+  .iv-btn { border: 1px solid var(--border-hi); background: var(--card); border-radius: 8px; padding: 4px 10px; font-size: 12px; cursor: pointer; color: var(--text); }
+  .iv-btn.active { background: var(--acc); color: #fff; border-color: var(--acc); }
+
+  /* ===== 横幅 ===== */
+  .banner { padding: 10px 14px; border-radius: 12px; margin: 0 0 14px; font-size: 13px; display: none; border: 1px solid var(--err-dim); background: var(--err-dim); color: var(--err); }
+  .banner.show { display: block; }
+
+  /* ===== KPI 卡 ===== */
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 12px; }
+  .kpi { position: relative; overflow: hidden; background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; box-shadow: var(--shadow); }
+  .kpi .lb { font-size: 11px; color: var(--muted); letter-spacing: .8px; text-transform: uppercase; display: flex; align-items: center; gap: 6px; }
+  .kpi .val { font-size: 26px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; letter-spacing: .3px; }
+  .kpi .val.ok { color: var(--ok); }
+  .kpi .note { font-size: 12px; color: var(--muted); margin-top: 2px; min-height: 18px; }
+  .kpi .spark { position: absolute; right: 12px; top: 14px; opacity: .9; }
+
+  /* ===== 运行条 ===== */
+  .runstrip { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 12px 16px; margin-bottom: 12px; box-shadow: var(--shadow); }
+  .runstrip .rs-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .runstrip .rs-title { font-size: 13px; font-weight: 700; }
+  .runstrip .rs-cur { font-size: 13px; color: var(--acc); font-weight: 600; word-break: break-all; }
+  .runstrip .rs-meta { font-size: 12px; color: var(--muted); margin-left: auto; }
+  .runstrip.idle .rs-title { color: var(--muted); font-weight: 600; }
+  .pbar { height: 8px; border-radius: 999px; background: var(--bar-track); overflow: hidden; margin-top: 10px; position: relative; }
+  .pbar .fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--acc), var(--acc-strong)); transition: width .8s ease; }
+  .pbar.running .fill { background-image: repeating-linear-gradient(45deg, rgba(255,255,255,.18) 0 8px, transparent 8px 16px); animation: stripes 1.1s linear infinite; }
+
+  @keyframes stripes { from { background-position: 0 0; } to { background-position: 32px 0; } }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 var(--acc-glow); } 70% { box-shadow: 0 0 0 7px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(8px) scale(.97); } to { opacity: 1; transform: none; } }
+
+  /* ===== 工具栏(筛选/排序/批量) ===== */
+  .toolbar { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 10px 14px; margin-bottom: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; box-shadow: var(--shadow); }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { border: 1px solid var(--border-hi); background: var(--card); border-radius: 999px; padding: 4px 12px; font-size: 12.5px; cursor: pointer; color: var(--muted); transition: all .12s; }
+  .chip:hover { color: var(--text); }
+  .chip.active { background: var(--acc-dim); color: var(--acc); border-color: var(--acc-glow); font-weight: 600; }
+  .chip .cnt { font-size: 11px; opacity: .75; margin-left: 3px; }
+  .tsearch { display: flex; align-items: center; gap: 6px; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 10px; padding: 5px 10px; }
+  .tsearch input { border: 0; background: none; color: var(--text); font-size: 13px; width: 130px; outline: none; }
+  .tsel { background: var(--bg-soft); border: 1px solid var(--border); color: var(--text); border-radius: 10px; padding: 6px 8px; font-size: 12.5px; outline: none; cursor: pointer; }
+  .tspace { flex: 1; }
+  .selinfo { font-size: 12px; color: var(--muted); }
+
+  /* ===== 账号卡片 ===== */
+  .accgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(335px, 1fr)); gap: 12px; margin-bottom: 6px; }
+  .acc { position: relative; background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 13px 14px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 9px; transition: border-color .15s, transform .12s; }
+  .acc:hover { border-color: var(--border-hi); transform: translateY(-1px); }
+  .acc.sel { border-color: var(--acc-glow); background: linear-gradient(var(--card), var(--card)) padding-box; }
+  .acc.is-run { border-color: var(--acc); box-shadow: 0 0 0 1px var(--acc-glow), var(--shadow); }
+  .acc.is-bad { border-color: var(--err-dim); }
+  .acc-top { display: flex; align-items: flex-start; gap: 9px; }
+  .pick { display: inline-flex; align-items: center; justify-content: center; margin-top: 1px; }
+  .pick input { width: 17px; height: 17px; accent-color: var(--acc); cursor: pointer; }
+  .acc-name { flex: 1; min-width: 0; }
+  .acc-email { font-size: 13px; font-weight: 600; word-break: break-all; line-height: 1.35; }
+  .acc-region { font-size: 11px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
+  .acc-region b.mk-ok { color: var(--ok); font-weight: 600; } .acc-region b.mk-warn { color: var(--warn); font-weight: 600; }
+  .acc-region .banned { color: var(--err); font-weight: 700; }
+  .st { flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); white-space: nowrap; margin-top: 2px; }
+  .st .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex-shrink: 0; }
+  .st.ok { color: var(--ok); } .st.ok .dot { background: var(--ok); }
+  .st.run { color: var(--acc); } .st.run .dot { background: var(--acc); animation: pulse 1.6s ease-out infinite; }
+  .st.bad { color: var(--err); } .st.bad .dot { background: var(--err); }
+  .st.part { color: var(--warn); } .st.part .dot { background: var(--warn); }
+
+  .acc-nums { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .numblk { background: var(--bg-soft); border-radius: 10px; padding: 8px 11px; }
+  .numblk .v { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .numblk .v.ok { color: var(--ok); }
+  .numblk .k { font-size: 11px; color: var(--muted); margin-top: 1px; }
+
+  .acc-tasks { font-size: 12px; }
+  .acc-tasks .tk-line { display: flex; justify-content: space-between; color: var(--muted); margin-bottom: 4px; }
+  .acc-tasks .tk-line b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .acc-tasks .tk-line .alldone { color: var(--ok); font-weight: 600; }
+  .tkbar { height: 6px; border-radius: 999px; background: var(--bar-track); overflow: hidden; }
+  .tkbar .fill { height: 100%; border-radius: 999px; background: var(--ok); transition: width .5s ease; }
+  .tkbar .fill.part { background: var(--warn); }
+
+  .acc-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); min-height: 20px; }
+  .errbadge { display: inline-flex; align-items: center; gap: 4px; color: var(--err); border: 1px solid var(--err-dim); background: var(--err-dim); border-radius: 999px; font-size: 11.5px; line-height: 1.6; padding: 1px 9px; cursor: pointer; white-space: nowrap; user-select: none; }
+  .errbadge:hover { filter: brightness(1.05); }
+  .ck-note-ok { color: var(--ok); } .ck-note-err { color: var(--err); } .ck-note-run { color: var(--warn); }
+
+  .acc-actions { display: flex; gap: 6px; flex-wrap: wrap; border-top: 1px solid var(--border); padding-top: 9px; margin-top: auto; }
+  .abtn { flex: 1; min-width: 58px; border: 1px solid var(--border-hi); background: var(--card); border-radius: 9px; padding: 6px 4px; font-size: 15px; cursor: pointer; text-align: center; transition: all .12s; position: relative; }
+  .abtn:hover { background: var(--card-hi); border-color: var(--acc-glow); transform: translateY(-1px); }
+  .abtn .lb { display: block; font-size: 10px; color: var(--muted); margin-top: 1px; }
+  .abtn.danger { border-color: var(--err-dim); background: var(--err-dim); }
+
+  .grid-empty { grid-column: 1 / -1; text-align: center; color: var(--muted); padding: 34px 10px; background: var(--card); border: 1px dashed var(--border-hi); border-radius: 14px; }
+
+  .sub { font-size: 12px; color: var(--muted); }
+  .ts { font-size: 11px; color: var(--muted); font-weight: 400; }
+  .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--bg-soft); color: var(--muted); white-space: nowrap; }
+  .badge.ok { background: var(--ok-dim); color: var(--ok); }
+  .badge.err { background: var(--err-dim); color: var(--err); }
+  .badge.run { background: var(--warn-dim); color: var(--warn); }
+  .badge.progress { background: var(--acc-dim); color: var(--acc); }
+  .hint { font-size: 12px; color: var(--muted); margin: 8px 2px 14px; line-height: 1.65; }
+
+  /* ===== 趋势图 ===== */
+  .panel { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; box-shadow: var(--shadow); }
+  .panel-h { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .panel-h h2 { margin: 0; font-size: 14px; font-weight: 700; }
+  .panel-h .sub { margin-left: auto; }
+  .chart-scroll { overflow-x: auto; }
+  .chart-scroll svg { display: block; }
+  .legend { display: flex; gap: 14px; font-size: 11.5px; color: var(--muted); margin-top: 6px; flex-wrap: wrap; }
+  .legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+
+  /* ===== 历史 ===== */
+  details.history { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 13px 16px; margin-top: 14px; box-shadow: var(--shadow); }
+  details.history summary { cursor: pointer; font-size: 14px; font-weight: 700; }
+  table.hist { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 10px; }
+  table.hist th, table.hist td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  table.hist th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  table.hist tr:last-child td { border-bottom: 0; }
+  table.hist tr:hover td { background: var(--card-hi); }
+  table.hist td.num, table.hist th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .empty { color: var(--muted); padding: 18px; text-align: center; }
+
+  .foot { color: var(--faint); font-size: 12px; text-align: center; margin-top: 28px; }
+
+  /* ===== 弹窗 ===== */
+  dialog { border: 1px solid var(--border-hi); border-radius: 16px; padding: 20px; width: min(680px, 94vw); max-height: 88vh; overflow: auto; background: var(--card); color: var(--text); box-shadow: var(--shadow-pop); }
+  dialog::backdrop { background: rgba(4, 8, 14, .58); backdrop-filter: blur(2px); }
+  dialog h2 { margin: 0 0 14px; font-size: 16px; }
+  dialog#mlModal { width: min(980px, 97vw); }
+  .rowact { white-space: nowrap; }
+  .pw-row { display: flex; align-items: center; gap: 8px; }
+  .eye { border: 0; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; padding: 8px 10px; font-size: 14px; margin-top: 4px; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 18px; }
+  .field { margin-bottom: 12px; }
+  .field label { font-size: 13px; color: var(--muted); }
+  input[type=text], input[type=password], input[type=search] { width: 100%; padding: 8px 10px; border: 1px solid var(--border-hi); border-radius: 9px; font-size: 14px; margin-top: 4px; background: var(--bg-soft); color: var(--text); outline: none; }
+  input[type=text]:focus, input[type=password]:focus, input[type=search]:focus { border-color: var(--acc); box-shadow: 0 0 0 3px var(--acc-dim); }
+  select { background: var(--bg-soft); color: var(--text); border: 1px solid var(--border-hi); border-radius: 9px; padding: 7px 10px; font-size: 13px; outline: none; }
+  .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .switch-row:last-child { border-bottom: 0; }
+  .switch { position: relative; width: 42px; height: 24px; flex-shrink: 0; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; inset: 0; background: var(--border-hi); border-radius: 24px; transition: .2s; cursor: pointer; }
+  .slider:before { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .2s; }
+  .switch input:checked + .slider { background: var(--ok); }
+  .switch input:checked + .slider:before { transform: translateX(18px); }
+  pre.logs { background: var(--code-bg); color: var(--code-fg); font-size: 12px; line-height: 1.55; padding: 12px; border-radius: 10px; max-height: 60vh; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+  pre.errbox { background: var(--code-bg); color: var(--code-err); font-size: 12px; line-height: 1.55; padding: 12px; border-radius: 10px; max-height: 55vh; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+
+  /* ===== Toast / 确认弹窗 ===== */
+  .toasts { position: fixed; right: 16px; bottom: 16px; z-index: 300; display: flex; flex-direction: column; gap: 8px; max-width: min(380px, calc(100vw - 32px)); }
+  .toast { background: var(--card); border: 1px solid var(--border-hi); border-left: 3px solid var(--acc); border-radius: 10px; box-shadow: var(--shadow-pop); padding: 10px 14px; font-size: 13px; animation: toast-in .22s ease; word-break: break-all; }
+  .toast.ok { border-left-color: var(--ok); }
+  .toast.err { border-left-color: var(--err); }
+  dialog.mini { width: min(430px, 92vw); }
+  dialog.mini .cf-body { font-size: 13.5px; line-height: 1.65; margin-bottom: 16px; word-break: break-all; }
+
+  /* ===== 响应式 ===== */
+  @media (max-width: 900px) { .kpis { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 640px) {
+    .wrap { padding: 12px 12px 48px; }
+    .topbar-in { padding: 8px 12px; }
+    .brand .sub { display: none; }
+    .kpis { gap: 9px; }
+    .kpi { padding: 12px 13px; } .kpi .val { font-size: 21px; }
+    .accgrid { grid-template-columns: 1fr; }
+    .grid-2 { grid-template-columns: 1fr; }
+    .tsearch input { width: 96px; }
+    .toolbar { gap: 8px; }
+    .runstrip .rs-meta { margin-left: 0; width: 100%; }
+  }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <header>
-    <h1><span class="logo">🅱️</span> MS-Rewards 积分看板</h1>
-    <div class="toolbar">
-      <span id="conn" class="status-pill">连接中…</span>
-      <span id="runState" class="status-pill">空闲</span>
-      <button class="btn secondary" id="btnStop" onclick="doStop()">⏹ 停止</button>
-      <div class="menu">
-        <button class="btn secondary" onclick="toggleMenu(event)">⚙ 菜单</button>
-        <div class="menu-drop" id="menuDrop">
-          <button class="menu-item" onclick="openCap(); closeMenu()">🎛 能力控制（并行/词源/调度）</button>
-          <button class="menu-item" onclick="openAccounts(); closeMenu()">👥 账号管理（动态添加）</button>
-          <button class="menu-item" onclick="openPush(); closeMenu()">🔔 通知设置（钉钉推送）</button>
-          <button class="menu-item" onclick="manualRefresh(); closeMenu()">⟳ 立即刷新</button>
-          <div class="menu-sep"></div>
-          <div class="menu-label">自动刷新间隔（当前 <span id="ivCur">15 秒</span>）</div>
-          <div class="iv-row">
-            <button class="iv-btn" data-ms="0" onclick="setRefresh(0)">关闭</button>
-            <button class="iv-btn" data-ms="5000" onclick="setRefresh(5000)">5 秒</button>
-            <button class="iv-btn" data-ms="15000" onclick="setRefresh(15000)">15 秒</button>
-            <button class="iv-btn" data-ms="30000" onclick="setRefresh(30000)">30 秒</button>
-            <button class="iv-btn" data-ms="60000" onclick="setRefresh(60000)">60 秒</button>
-          </div>
+<div class="topbar">
+  <div class="topbar-in">
+    <div class="brand">
+      <div class="mark">🅱️</div>
+      <div><h1>MS-Rewards 积分看板</h1><div class="sub">微软积分自动化 · 内网控制台</div></div>
+    </div>
+    <span id="conn" class="pill"><span class="dot"></span>连接中…</span>
+    <span id="runState" class="pill"><span class="dot"></span>空闲</span>
+    <button class="btn secondary iconbtn" id="btnTheme" title="切换深色 / 浅色主题" onclick="toggleTheme()">🌙</button>
+    <button class="btn secondary" id="btnStop" onclick="doStop()">⏹ 停止</button>
+    <div class="menu">
+      <button class="btn secondary" onclick="toggleMenu(event)">⚙ 菜单</button>
+      <div class="menu-drop" id="menuDrop">
+        <button class="menu-item" onclick="openCap(); closeMenu()">🎛 能力控制（并行/词源/调度）</button>
+        <button class="menu-item" onclick="openAccounts(); closeMenu()">👥 账号管理（动态添加）</button>
+        <button class="menu-item" onclick="openPush(); closeMenu()">🔔 通知设置（钉钉/邮件）</button>
+        <button class="menu-item" onclick="manualRefresh(); closeMenu()">⟳ 立即刷新</button>
+        <div class="menu-sep"></div>
+        <div class="menu-label">自动刷新间隔（当前 <span id="ivCur">15 秒</span>）</div>
+        <div class="iv-row">
+          <button class="iv-btn" data-ms="0" onclick="setRefresh(0)">关闭</button>
+          <button class="iv-btn" data-ms="5000" onclick="setRefresh(5000)">5 秒</button>
+          <button class="iv-btn" data-ms="15000" onclick="setRefresh(15000)">15 秒</button>
+          <button class="iv-btn" data-ms="30000" onclick="setRefresh(30000)">30 秒</button>
+          <button class="iv-btn" data-ms="60000" onclick="setRefresh(60000)">60 秒</button>
         </div>
       </div>
     </div>
-  </header>
-
-  <div id="diag" class="msg err"></div>
-
-  <div class="summary">
-    <div class="card"><div class="sub">账号总数</div><div class="num" id="sumAccounts">-</div></div>
-    <div class="card"><div class="sub">总余额（上次已知）</div><div class="num" id="sumBalance">-</div></div>
-    <div class="card"><div class="sub">今日获得（<span id="todayLabel">-</span>）</div><div class="num" style="color:var(--ok)" id="sumToday">-</div></div>
-    <div class="card"><div class="sub">当前运行</div><div class="num" id="runInfo" style="font-size:14px;line-height:1.55;font-weight:600">-</div></div>
   </div>
+</div>
 
-  <div class="selbar">
-    <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="selAll" onchange="toggleAll(this.checked)"> 全选</label>
-    <span id="selInfo" class="sub">未选择账号时默认运行全部</span>
-    <div class="grow"></div>
-    <button class="btn small secondary" onclick="selectVisible(false)">清空选择</button>
+<div class="wrap">
+  <div id="diag" class="banner"></div>
+
+  <section class="kpis">
+    <div class="kpi"><div class="lb">账号总数</div><div class="val" id="sumAccounts">-</div><div class="note" id="sumAccountsNote">&nbsp;</div></div>
+    <div class="kpi"><div class="lb">总余额（上次已知）</div><div class="val" id="sumBalance">-</div><div class="note" id="sumBalNote">&nbsp;</div><svg class="spark" id="spark" width="86" height="30" viewBox="0 0 86 30" aria-hidden="true"></svg></div>
+    <div class="kpi"><div class="lb">今日获得 · <span id="todayLabel">-</span></div><div class="val ok" id="sumToday">-</div><div class="note" id="sumTodayNote">&nbsp;</div></div>
+    <div class="kpi"><div class="lb">下次定时运行</div><div class="val" id="nextRun" style="font-size:20px">-</div><div class="note" id="nextRunNote">&nbsp;</div></div>
+  </section>
+
+  <section class="runstrip idle" id="runStrip">
+    <div class="rs-top">
+      <span class="rs-title" id="rsTitle">空闲</span>
+      <span class="rs-cur" id="rsCur"></span>
+      <span class="rs-meta" id="rsMeta"></span>
+    </div>
+    <div class="pbar" id="rsBar" style="display:none"><div class="fill" id="rsFill" style="width:0%"></div></div>
+  </section>
+
+  <section class="toolbar">
+    <div class="chips" id="chips">
+      <button class="chip active" data-f="all" onclick="setFilter('all')">全部<span class="cnt" id="fc-all"></span></button>
+      <button class="chip" data-f="bad" onclick="setFilter('bad')">异常<span class="cnt" id="fc-bad"></span></button>
+      <button class="chip" data-f="run" onclick="setFilter('run')">运行中<span class="cnt" id="fc-run"></span></button>
+      <button class="chip" data-f="undone" onclick="setFilter('undone')">未达标<span class="cnt" id="fc-undone"></span></button>
+      <button class="chip" data-f="done" onclick="setFilter('done')">已达标<span class="cnt" id="fc-done"></span></button>
+    </div>
+    <div class="tsearch">🔍<input type="search" id="fsearch" placeholder="搜索账号…" oninput="renderAccounts(Date.now())"></div>
+    <select class="tsel" id="forder" onchange="renderAccounts(Date.now())">
+      <option value="idx">默认顺序</option>
+      <option value="bal">余额 ↓</option>
+      <option value="today">今日获得 ↓</option>
+      <option value="act">最近活动 ↓</option>
+    </select>
+    <div class="tspace"></div>
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px"><input type="checkbox" id="selAll" onchange="toggleAll(this.checked)" style="width:15px;height:15px;accent-color:var(--acc)"> 全选(筛选内)</label>
+    <span class="selinfo" id="selInfo">未选择账号时默认运行全部</span>
     <button class="btn" id="btnRun" onclick="doRun()">▶ 运行</button>
     <button class="btn small secondary" id="btnSync" onclick="doSyncAll()" title="逐个账号经微软接口实测余额与任务完成度(轻量, 不开浏览器, 每号约 2 秒)">🔄 同步余额</button>
     <button class="btn small secondary" id="btnMarket" onclick="doMarketProbe()" title="恢复每号会话打开一次兑换页: 检测兑换市场(归属目录)与当前服务区域, 约 40-60 秒/号, 共约 5 分钟; 仅脚本空闲时可跑">🌏 检测区域</button>
     <button class="btn small secondary" id="btnNetDiag" onclick="doNetDiag()" title="一键诊断网络: 请求全部微软域并核对 OpenClash 连接表, 确认没有流量走代理节点(约 30 秒)">🛰 网络诊断</button>
-  </div>
+  </section>
 
-  <div class="tblwrap">
-    <table class="acc">
-      <thead><tr>
-        <th style="width:34px"></th>
-        <th style="width:36px">#</th>
-        <th>账号</th>
-        <th class="num">余额</th>
-        <th class="num" title="微软余额接口口径: 当前余额 - 当日锚点余额。一次性奖励、微软侧积分调整都会如实计入">今日获得</th>
-        <th title="微软接口逐项实测(当日每日任务集 + 搜索计数器 + 打卡子任务); 点 🩺 体检或 🔄 同步余额 时更新。已完成 = 全部逐项通过">任务</th>
-        <th style="width:76px">状态</th>
-        <th style="width:112px">最近活动</th>
-        <th>备注 / 错误</th>
-        <th style="width:84px">操作</th>
-      </tr></thead>
-      <tbody id="accRows"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
-    </table>
-  </div>
-  <div class="hint">余额为脚本最近一次成功运行时的已知值，打开页面即可见、无需等待运行；「今日获得」按微软余额接口口径计算（当日余额 − 当日起点余额），一次性奖励与微软侧调整会如实计入，跨天自动归零。勾选账号后点「运行」只跑选中的账号；不勾选则跑全部。</div>
+  <section class="accgrid" id="accGrid"><div class="grid-empty">加载中…</div></section>
+  <div class="hint">余额为脚本最近一次成功运行时的已知值，打开页面即可见；「今日获得」按微软余额接口口径（当日余额 − 当日起点余额），一次性奖励与微软侧调整如实计入，跨天自动归零。勾选账号后点「运行」只跑选中的账号；不勾选则跑全部。</div>
+
+  <section class="panel">
+    <div class="panel-h">
+      <h2>📈 积分趋势</h2>
+      <span class="sub" id="trendSub">加载中…</span>
+      <div class="legend">
+        <span><span class="sw" style="background:var(--acc)"></span>每日获得(左轴)</span>
+        <span><span class="sw" style="background:var(--ok)"></span>总余额走势(右轴, 相对缩放)</span>
+      </div>
+    </div>
+    <div class="chart-scroll" id="trendChart"><div class="empty">暂无趋势数据</div></div>
+  </section>
 
   <details class="history">
     <summary>📜 运行历史（最近 10 次）与调度</summary>
@@ -2073,191 +2371,295 @@ const HTML = `<!DOCTYPE html>
     </table>
   </details>
 
-  <dialog id="netDiagModal">
-    <h2>🛰 网络诊断</h2>
-    <div id="netDiagBody">诊断中…</div>
-    <div style="margin-top:14px;text-align:right">
-      <button class="btn secondary" onclick="document.getElementById('netDiagModal').close()">关闭</button>
-      <button class="btn" onclick="doNetDiag()">重新诊断</button>
-    </div>
-  </dialog>
-  <dialog id="pushModal">
-    <h2>🔔 推送设置（钉钉）</h2>
-    <div class="grid-2">
-      <div>
-        <div class="field"><label>钉钉 access_token</label><div class="pw-row"><input type="password" id="ddToken" placeholder="钉钉机器人 token"><button type="button" class="eye" onclick="togglePass('ddToken',this)">👁</button></div></div>
-        <div class="field"><label>加签 SECRET（无则留空）</label><div class="pw-row"><input type="password" id="ddSecret" placeholder="SEC…"><button type="button" class="eye" onclick="togglePass('ddSecret',this)">👁</button></div></div>
-        <div class="field"><label>自定义关键词（消息前缀）</label><input type="text" id="ddKeyword" placeholder="MS-Rewards"></div>
-        <div class="field"><label>同类事件去重（秒）</label><input type="text" id="ddDedup" placeholder="10"></div>
-        <div class="switch-row"><span>钉钉推送总开关</span><label class="switch"><input type="checkbox" id="ddEnabled"><span class="slider"></span></label></div>
-      </div>
-      <div>
-        <div class="switch-row"><span>🚀 开始运行</span><label class="switch"><input type="checkbox" id="ev-runStart"><span class="slider"></span></label></div>
-        <div class="switch-row"><span>✅ 全部完成</span><label class="switch"><input type="checkbox" id="ev-runEnd"><span class="slider"></span></label></div>
-        <div class="switch-row"><span>👤 账号完成</span><label class="switch"><input type="checkbox" id="ev-accountEnd"><span class="slider"></span></label></div>
-        <div class="switch-row"><span>❌ 错误</span><label class="switch"><input type="checkbox" id="ev-error"><span class="slider"></span></label></div>
-        <div class="switch-row"><span>⚠️ 登录/风控异常</span><label class="switch"><input type="checkbox" id="ev-loginFail"><span class="slider"></span></label></div>
-        <div class="switch-row"><span>📊 运行摘要（每日）</span><label class="switch"><input type="checkbox" id="ev-dailySummary"><span class="slider"></span></label></div>
-      </div>
-    </div>
-    <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
-      <div class="field"><label>📧 邮件通知（与钉钉并存，事件同时发邮件）</label>
-        <div class="switch-row" style="border:0;padding:4px 0"><span>启用邮件通知</span><label class="switch"><input type="checkbox" id="emEnabled"><span class="slider"></span></label></div>
-      </div>
-      <div class="grid-2">
-        <div class="field"><label>SMTP 服务器（如 smtp.qq.com）</label><input type="text" id="emHost" placeholder="smtp.qq.com"></div>
-        <div class="field"><label>端口（465=SSL，587=STARTTLS）</label><input type="text" id="emPort" placeholder="465"></div>
-        <div class="field"><label>发件邮箱（登录账号）</label><input type="text" id="emUser" placeholder="you@qq.com"></div>
-        <div class="field"><label>SMTP 授权码（不是登录密码）</label><div class="pw-row"><input type="password" id="emPass" placeholder="授权码"><button type="button" class="eye" onclick="togglePass('emPass',this)">👁</button></div></div>
-        <div class="field"><label>收件邮箱（多个用逗号分隔）</label><input type="text" id="emTo" placeholder="target@example.com"></div>
-      </div>
-    </div>
-    <div class="hint">钉钉安全设置：自定义关键词需与机器人配置一致，或使用加签模式（填 SECRET）。修改后点「保存」即时生效，无需重启服务。</div>
-    <div class="toolbar" style="margin-top:14px">
-      <button class="btn" onclick="savePush()">💾 保存</button>
-      <button class="btn secondary" onclick="testPush()">🧪 测试推送</button>
-      <button class="btn secondary" onclick="closePush()">关闭</button>
-      <span id="pushMsg" class="sub"></span>
-    </div>
-  </dialog>
-
-  <dialog id="mlModal">
-    <h2>🔑 人工登录 <span id="mlEmail" style="color:var(--ms-blue)"></span></h2>
-    <div class="hint">容器内浏览器已打开(先移动端、后桌面端, 依次完成)。在下方窗口完成微软登录;停留在 Rewards 页面 5 秒会自动保存会话并进入下一平台, 两个平台都完成后自动结束。关闭本弹窗会中止会话(已保存的平台不受影响)。</div>
-    <iframe id="mlFrame" style="width:100%;height:540px;border:1px solid var(--border);border-radius:8px;background:#111"></iframe>
-    <div class="sub" id="mlStatus" style="margin-top:8px"></div>
-    <div class="toolbar" style="margin-top:10px">
-      <button class="btn" onclick="mlClose()">关闭并中止</button>
-    </div>
-  </dialog>
-
-  <dialog id="acctModal">
-    <h2>👥 账号管理</h2>
-    <div class="hint">全部账号均可 🌏 改地区、🔑 改密与 🗑 删除，<b>下一次运行自动生效</b>（每日定时或手动触发均可），无需重启容器；删除的账号重新添加即可恢复。账号数据保存在 config 卷的 accounts.json。新增账号首次运行需要自动登录，若遇微软身份验证卡点，用主表格对应行的 🔑 人工登录完成。</div>
-    <table class="hist" style="margin-bottom:14px">
-      <thead><tr><th>账号</th><th>地区</th><th>2FA</th><th style="width:150px">操作</th></tr></thead>
-      <tbody id="acctRows"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
-    </table>
-    <div class="grid-2">
-      <div>
-        <div class="field"><label>邮箱</label><input type="text" id="naEmail" placeholder="user@example.com"></div>
-        <div class="field"><label>密码</label><div class="pw-row"><input type="password" id="naPass" placeholder="微软账号密码"><button type="button" class="eye" onclick="togglePass('naPass',this)">👁</button></div></div>
-        <div class="field"><label>地区（搜索环境语言/市场，默认国区 cn）</label>
-          <select id="naGeo" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:14px;margin-top:4px">
-            <option value="cn" selected>cn（国区）</option><option value="gb">gb（英国）</option><option value="us">us（美国）</option><option value="auto">auto（自动）</option><option value="de">de</option><option value="fr">fr</option><option value="jp">jp</option><option value="ca">ca</option><option value="au">au</option>
-          </select>
-        </div>
-        <div class="field"><label>2FA 密钥（无则留空）</label><input type="text" id="naTotp" placeholder="可选"></div>
-      </div>
-      <div class="hint" style="padding-top:6px">
-        说明：<br>· 动态账号与 .env 固定账号在运行、体检、人工登录中完全等价；<br>· 序号从 901 起编（批量勾选运行时可见）；<br>· 凭据明文存放于 config 卷（600 权限），请勿暴露该目录；<br>· 删除动态账号不会清除其已保存的登录会话，如需彻底清理请用容器 API 的 DELETE /sessions/:邮箱。
-      </div>
-    </div>
-    <div class="toolbar" style="margin-top:14px">
-      <button class="btn" onclick="addAccount()">➕ 添加账号</button>
-      <button class="btn secondary" onclick="closeAccounts()">关闭</button>
-      <span id="acctMsg" class="sub"></span>
-    </div>
-  </dialog>
-
-  <dialog id="capModal">
-    <h2>🎛 能力控制</h2>
-    <div class="hint">设置写入容器 config.json，<b>下一次运行自动生效</b>，无需重启容器。</div>
-    <div class="grid-2">
-      <div>
-        <div class="field"><label>并行集群数（一次运行同时处理的账号数，内存随集群数增加）</label>
-          <select id="capClusters" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:14px;margin-top:4px">
-            <option value="1">1（串行，最省内存）</option><option value="2">2（推荐）</option><option value="3">3（内存紧张）</option>
-          </select>
-        </div>
-        <div class="field"><label>搜索词源</label>
-          <select id="capEngines" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:14px;margin-top:4px">
-            <option value="china,local">中国热搜 + 本地兜底（推荐）</option>
-            <option value="china">仅中国热搜</option>
-            <option value="google,local">Google Trends + 本地</option>
-            <option value="local">仅本地词库</option>
-          </select>
-        </div>
-        <div class="field"><label>gmya appkey（解除免费档限流；留空=不修改）</label><input type="text" id="capAppkey" placeholder="已配置则显示占位符"></div>
-        <div class="field"><label>搜索间隔（反风控核心参数，越快风险越高）</label>
-          <select id="capDelay" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:14px;margin-top:4px">
-            <option value="6,12">稳妥 6-12 分钟</option>
-            <option value="5,9">标准 5-9 分钟（当前）</option>
-            <option value="4,8">较快 4-8 分钟</option>
-            <option value="3,6">激进 3-6 分钟（风险自担）</option>
-          </select>
-        </div>
-      </div>
-      <div>
-        <div class="field"><label>每日调度时间</label>
-          <div class="pw-row">
-            每天 <select id="capCronHour" style="padding:6px 8px;border:1px solid var(--border);border-radius:8px;font-size:13px"></select> 点
-            <select id="capCronMin" style="padding:6px 8px;border:1px solid var(--border);border-radius:8px;font-size:13px"><option value="0">00</option><option value="15">15</option><option value="30" selected>30</option><option value="45">45</option></select> 分
-          </div>
-        </div>
-        <div class="switch-row"><span>启用每日定时</span><label class="switch"><input type="checkbox" id="capCronOn" checked><span class="slider"></span></label></div>
-        <div class="hint">调度写入 config/schedule.json 并即时重装容器内 crontab（优先于 CRON_SCHEDULE 环境变量）。</div>
-      </div>
-    </div>
-    <div class="field"><label>任务开关（关闭的板块在后续运行中跳过）</label>
-      <div class="grid-2" style="font-size:13px">
-        <div class="switch-row"><span>每日任务集</span><label class="switch"><input type="checkbox" id="w-doDailySet" checked><span class="slider"></span></label></div>
-        <div class="switch-row"><span>桌面搜索</span><label class="switch"><input type="checkbox" id="w-doDesktopSearch" checked><span class="slider"></span></label></div>
-        <div class="switch-row"><span>移动搜索</span><label class="switch"><input type="checkbox" id="w-doMobileSearch" checked><span class="slider"></span></label></div>
-        <div class="switch-row"><span>每日签到</span><label class="switch"><input type="checkbox" id="w-doDailyCheckIn" checked><span class="slider"></span></label></div>
-        <div class="switch-row"><span>读赚</span><label class="switch"><input type="checkbox" id="w-doReadToEarn" checked><span class="slider"></span></label></div>
-        <div class="switch-row"><span>特殊活动</span><label class="switch"><input type="checkbox" id="w-doSpecialPromotions" checked><span class="slider"></span></label></div>
-        <div class="switch-row"><span>更多活动</span><label class="switch"><input type="checkbox" id="w-doMorePromotions" checked><span class="slider"></span></label></div>
-        <div class="switch-row"><span>打卡任务</span><label class="switch"><input type="checkbox" id="w-doPunchCards" checked><span class="slider"></span></label></div>
-        <div class="switch-row"><span>App 任务</span><label class="switch"><input type="checkbox" id="w-doAppPromotions" checked><span class="slider"></span></label></div>
-        <div class="switch-row"><span>领取奖励积分</span><label class="switch"><input type="checkbox" id="w-doClaimBonusPoints" checked><span class="slider"></span></label></div>
-        <div class="switch-row"><span>搜索加成激活</span><label class="switch"><input type="checkbox" id="w-doActivateSearchPerk" checked><span class="slider"></span></label></div>
-        <div class="switch-row"><span>额外搜索</span><label class="switch"><input type="checkbox" id="w-doBonusSearches"><span class="slider"></span></label></div>
-        <div class="switch-row"><span>视觉搜索</span><label class="switch"><input type="checkbox" id="w-doVisualSearch"><span class="slider"></span></label></div>
-      </div>
-    </div>
-    <div class="toolbar" style="margin-top:14px">
-      <button class="btn" onclick="saveCap()">💾 保存</button>
-      <button class="btn secondary" onclick="closeCap()">关闭</button>
-      <span id="capMsg" class="sub"></span>
-    </div>
-  </dialog>
-
-  <dialog id="logsModal">
-    <h2>📜 运行日志 <span id="logsEmail" style="color:var(--ms-blue)"></span></h2>
-    <div class="toolbar" style="margin-bottom:8px">
-      <label class="sub">日期:</label>
-      <select id="logsDate" onchange="onLogsDateChange()" style="padding:6px 8px;border:1px solid var(--border);border-radius:8px;font-size:13px"><option value="">加载中…</option></select>
-      <span class="sub">历史按天读取脚本日志文件, 保留 7 天</span>
-    </div>
-    <pre id="logsBox" style="background:#101418;color:#cde3d8;font-size:12px;line-height:1.5;padding:12px;border-radius:8px;max-height:60vh;overflow:auto;white-space:pre-wrap;word-break:break-all">加载中…</pre>
-    <div class="toolbar" style="margin-top:10px">
-      <button class="btn secondary" onclick="closeLogs()">关闭</button>
-      <span class="sub" id="logsHint">实时模式: 每 3 秒自动刷新(内存缓存最近 300 条)</span>
-    </div>
-  </dialog>
-
-  <dialog id="errModal">
-    <h2>⚠ 错误详情 <span id="errEmail" style="color:var(--ms-blue)"></span></h2>
-    <div class="sub" id="errTime" style="margin-bottom:8px"></div>
-    <pre id="errBox" style="background:#101418;color:#ffb4b4;font-size:12px;line-height:1.5;padding:12px;border-radius:8px;max-height:55vh;overflow:auto;white-space:pre-wrap;word-break:break-all"></pre>
-    <div class="toolbar" style="margin-top:10px">
-      <button class="btn secondary" onclick="closeErrModal()">关闭</button>
-      <span class="sub">来自最近一次运行/体检的失败信息, 重跑成功后自动清除</span>
-    </div>
-  </dialog>
-
   <div class="foot">数据来源: microsoft-rewards-script 容器 API · <span id="footRefresh">每 15 秒自动刷新</span> · ms-rewards-dashboard</div>
 </div>
+
+<div class="toasts" id="toasts"></div>
+
+<dialog id="netDiagModal">
+  <h2>🛰 网络诊断</h2>
+  <div id="netDiagBody">诊断中…</div>
+  <div style="margin-top:14px;text-align:right">
+    <button class="btn secondary" onclick="document.getElementById('netDiagModal').close()">关闭</button>
+    <button class="btn" onclick="doNetDiag()">重新诊断</button>
+  </div>
+</dialog>
+
+<dialog id="pushModal">
+  <h2>🔔 推送设置（钉钉 + 邮件）</h2>
+  <div class="grid-2">
+    <div>
+      <div class="field"><label>钉钉 access_token</label><div class="pw-row"><input type="password" id="ddToken" placeholder="钉钉机器人 token"><button type="button" class="eye" onclick="togglePass('ddToken',this)">👁</button></div></div>
+      <div class="field"><label>加签 SECRET（无则留空）</label><div class="pw-row"><input type="password" id="ddSecret" placeholder="SEC…"><button type="button" class="eye" onclick="togglePass('ddSecret',this)">👁</button></div></div>
+      <div class="field"><label>自定义关键词（消息前缀）</label><input type="text" id="ddKeyword" placeholder="MS-Rewards"></div>
+      <div class="field"><label>同类事件去重（秒）</label><input type="text" id="ddDedup" placeholder="10"></div>
+      <div class="switch-row"><span>钉钉推送总开关</span><label class="switch"><input type="checkbox" id="ddEnabled"><span class="slider"></span></label></div>
+    </div>
+    <div>
+      <div class="switch-row"><span>🚀 开始运行</span><label class="switch"><input type="checkbox" id="ev-runStart"><span class="slider"></span></label></div>
+      <div class="switch-row"><span>✅ 全部完成</span><label class="switch"><input type="checkbox" id="ev-runEnd"><span class="slider"></span></label></div>
+      <div class="switch-row"><span>👤 账号完成</span><label class="switch"><input type="checkbox" id="ev-accountEnd"><span class="slider"></span></label></div>
+      <div class="switch-row"><span>❌ 错误</span><label class="switch"><input type="checkbox" id="ev-error"><span class="slider"></span></label></div>
+      <div class="switch-row"><span>⚠️ 登录/风控异常</span><label class="switch"><input type="checkbox" id="ev-loginFail"><span class="slider"></span></label></div>
+      <div class="switch-row"><span>📊 每日摘要（每天 21:30 推送当日汇总）</span><label class="switch"><input type="checkbox" id="ev-dailySummary"><span class="slider"></span></label></div>
+    </div>
+  </div>
+  <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
+    <div class="field"><label>📧 邮件通知（与钉钉并存，事件同时发邮件）</label>
+      <div class="switch-row" style="border:0;padding:4px 0"><span>启用邮件通知</span><label class="switch"><input type="checkbox" id="emEnabled"><span class="slider"></span></label></div>
+    </div>
+    <div class="grid-2">
+      <div class="field"><label>SMTP 服务器（如 smtp.qq.com）</label><input type="text" id="emHost" placeholder="smtp.qq.com"></div>
+      <div class="field"><label>端口（465=SSL，587=STARTTLS）</label><input type="text" id="emPort" placeholder="465"></div>
+      <div class="field"><label>发件邮箱（登录账号）</label><input type="text" id="emUser" placeholder="you@qq.com"></div>
+      <div class="field"><label>SMTP 授权码（不是登录密码）</label><div class="pw-row"><input type="password" id="emPass" placeholder="授权码"><button type="button" class="eye" onclick="togglePass('emPass',this)">👁</button></div></div>
+      <div class="field"><label>收件邮箱（多个用逗号分隔）</label><input type="text" id="emTo" placeholder="target@example.com"></div>
+    </div>
+  </div>
+  <div class="hint">钉钉安全设置：自定义关键词需与机器人配置一致，或使用加签模式（填 SECRET）。修改后点「保存」即时生效，无需重启服务。</div>
+  <div class="toolbar" style="margin-top:12px">
+    <button class="btn" onclick="savePush()">💾 保存</button>
+    <button class="btn secondary" onclick="testPush()">🧪 测试推送</button>
+    <button class="btn secondary" onclick="closePush()">关闭</button>
+    <span id="pushMsg" class="sub"></span>
+  </div>
+</dialog>
+
+<dialog id="mlModal">
+  <h2>🔑 人工登录 <span id="mlEmail" style="color:var(--acc)"></span></h2>
+  <div class="hint">容器内浏览器已打开(先移动端、后桌面端, 依次完成)。在下方窗口完成微软登录;停留在 Rewards 页面 5 秒会自动保存会话并进入下一平台, 两个平台都完成后自动结束。关闭本弹窗会中止会话(已保存的平台不受影响)。</div>
+  <iframe id="mlFrame" style="width:100%;height:540px;border:1px solid var(--border-hi);border-radius:10px;background:#111"></iframe>
+  <div class="sub" id="mlStatus" style="margin-top:8px"></div>
+  <div class="toolbar" style="margin-top:10px">
+    <button class="btn" onclick="mlClose()">关闭并中止</button>
+  </div>
+</dialog>
+
+<dialog id="acctModal">
+  <h2>👥 账号管理</h2>
+  <div class="hint">全部账号均可 🌏 改地区、🔑 改密与 🗑 删除，<b>下一次运行自动生效</b>，无需重启容器；删除的账号重新添加即可恢复。账号数据保存在 config 卷的 accounts.json。新增账号首次运行需要自动登录，若遇微软身份验证卡点，用主表格对应行的 🔑 人工登录完成。</div>
+  <table class="hist" style="margin-bottom:14px">
+    <thead><tr><th>账号</th><th>地区</th><th>2FA</th><th style="width:170px">操作</th></tr></thead>
+    <tbody id="acctRows"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>
+  </table>
+  <div class="grid-2">
+    <div>
+      <div class="field"><label>邮箱</label><input type="text" id="naEmail" placeholder="user@example.com"></div>
+      <div class="field"><label>密码</label><div class="pw-row"><input type="password" id="naPass" placeholder="微软账号密码"><button type="button" class="eye" onclick="togglePass('naPass',this)">👁</button></div></div>
+      <div class="field"><label>地区（搜索环境语言/市场，默认国区 cn）</label>
+        <select id="naGeo" style="width:100%;padding:8px 10px;font-size:14px;margin-top:4px">
+          <option value="cn" selected>cn（国区）</option><option value="gb">gb（英国）</option><option value="us">us（美国）</option><option value="auto">auto（自动）</option><option value="de">de</option><option value="fr">fr</option><option value="jp">jp</option><option value="ca">ca</option><option value="au">au</option>
+        </select>
+      </div>
+      <div class="field"><label>2FA 密钥（无则留空）</label><input type="text" id="naTotp" placeholder="可选"></div>
+    </div>
+    <div class="hint" style="padding-top:6px">
+      说明：<br>· 动态账号与 .env 固定账号在运行、体检、人工登录中完全等价；<br>· 序号从 901 起编（批量勾选运行时可见）；<br>· 凭据明文存放于 config 卷（600 权限），请勿暴露该目录；<br>· 删除动态账号不会清除其已保存的登录会话，如需彻底清理请用容器 API 的 DELETE /sessions/:邮箱。
+    </div>
+  </div>
+  <div class="toolbar" style="margin-top:14px">
+    <button class="btn" onclick="addAccount()">➕ 添加账号</button>
+    <button class="btn secondary" onclick="closeAccounts()">关闭</button>
+    <span id="acctMsg" class="sub"></span>
+  </div>
+</dialog>
+
+<dialog id="capModal">
+  <h2>🎛 能力控制</h2>
+  <div class="hint">设置写入容器 config.json，<b>下一次运行自动生效</b>，无需重启容器。</div>
+  <div class="grid-2">
+    <div>
+      <div class="field"><label>并行集群数（一次运行同时处理的账号数，内存随集群数增加）</label>
+        <select id="capClusters" style="width:100%;padding:8px 10px;font-size:14px;margin-top:4px">
+          <option value="1">1（串行，最省内存）</option><option value="2">2（推荐）</option><option value="3">3（内存紧张）</option>
+        </select>
+      </div>
+      <div class="field"><label>搜索词源</label>
+        <select id="capEngines" style="width:100%;padding:8px 10px;font-size:14px;margin-top:4px">
+          <option value="china,local">中国热搜 + 本地兜底（推荐）</option>
+          <option value="china">仅中国热搜</option>
+          <option value="google,local">Google Trends + 本地</option>
+          <option value="local">仅本地词库</option>
+        </select>
+      </div>
+      <div class="field"><label>gmya appkey（解除免费档限流；留空=不修改）</label><input type="text" id="capAppkey" placeholder="已配置则显示占位符"></div>
+      <div class="field"><label>搜索间隔（反风控核心参数，越快风险越高）</label>
+        <select id="capDelay" style="width:100%;padding:8px 10px;font-size:14px;margin-top:4px">
+          <option value="6,12">稳妥 6-12 分钟</option>
+          <option value="5,9">标准 5-9 分钟（当前）</option>
+          <option value="4,8">较快 4-8 分钟</option>
+          <option value="3,6">激进 3-6 分钟（风险自担）</option>
+        </select>
+      </div>
+    </div>
+    <div>
+      <div class="field"><label>每日调度时间</label>
+        <div class="pw-row">
+          每天 <select id="capCronHour" style="padding:6px 8px;font-size:13px"></select> 点
+          <select id="capCronMin" style="padding:6px 8px;font-size:13px"><option value="0">00</option><option value="15">15</option><option value="30" selected>30</option><option value="45">45</option></select> 分
+        </div>
+      </div>
+      <div class="switch-row"><span>启用每日定时</span><label class="switch"><input type="checkbox" id="capCronOn" checked><span class="slider"></span></label></div>
+      <div class="hint">调度写入 config/schedule.json 并即时重装容器内 crontab（优先于 CRON_SCHEDULE 环境变量）。</div>
+    </div>
+  </div>
+  <div class="field"><label>任务开关（关闭的板块在后续运行中跳过）</label>
+    <div class="grid-2" style="font-size:13px">
+      <div class="switch-row"><span>每日任务集</span><label class="switch"><input type="checkbox" id="w-doDailySet" checked><span class="slider"></span></label></div>
+      <div class="switch-row"><span>桌面搜索</span><label class="switch"><input type="checkbox" id="w-doDesktopSearch" checked><span class="slider"></span></label></div>
+      <div class="switch-row"><span>移动搜索</span><label class="switch"><input type="checkbox" id="w-doMobileSearch" checked><span class="slider"></span></label></div>
+      <div class="switch-row"><span>每日签到</span><label class="switch"><input type="checkbox" id="w-doDailyCheckIn" checked><span class="slider"></span></label></div>
+      <div class="switch-row"><span>读赚</span><label class="switch"><input type="checkbox" id="w-doReadToEarn" checked><span class="slider"></span></label></div>
+      <div class="switch-row"><span>特殊活动</span><label class="switch"><input type="checkbox" id="w-doSpecialPromotions" checked><span class="slider"></span></label></div>
+      <div class="switch-row"><span>更多活动</span><label class="switch"><input type="checkbox" id="w-doMorePromotions" checked><span class="slider"></span></label></div>
+      <div class="switch-row"><span>打卡任务</span><label class="switch"><input type="checkbox" id="w-doPunchCards" checked><span class="slider"></span></label></div>
+      <div class="switch-row"><span>App 任务</span><label class="switch"><input type="checkbox" id="w-doAppPromotions" checked><span class="slider"></span></label></div>
+      <div class="switch-row"><span>领取奖励积分</span><label class="switch"><input type="checkbox" id="w-doClaimBonusPoints" checked><span class="slider"></span></label></div>
+      <div class="switch-row"><span>搜索加成激活</span><label class="switch"><input type="checkbox" id="w-doActivateSearchPerk" checked><span class="slider"></span></label></div>
+      <div class="switch-row"><span>额外搜索</span><label class="switch"><input type="checkbox" id="w-doBonusSearches"><span class="slider"></span></label></div>
+      <div class="switch-row"><span>视觉搜索</span><label class="switch"><input type="checkbox" id="w-doVisualSearch"><span class="slider"></span></label></div>
+    </div>
+  </div>
+  <div class="toolbar" style="margin-top:14px">
+    <button class="btn" onclick="saveCap()">💾 保存</button>
+    <button class="btn secondary" onclick="closeCap()">关闭</button>
+    <span id="capMsg" class="sub"></span>
+  </div>
+</dialog>
+
+<dialog id="logsModal">
+  <h2>📜 运行日志 <span id="logsEmail" style="color:var(--acc)"></span></h2>
+  <div class="toolbar" style="margin-bottom:8px">
+    <label class="sub">日期:</label>
+    <select id="logsDate" onchange="onLogsDateChange()" style="padding:6px 8px;font-size:13px"><option value="">加载中…</option></select>
+    <span class="sub">历史按天读取脚本日志文件, 保留 7 天</span>
+    <button class="btn small secondary" title="滚动到最新日志" onclick="logsJumpEnd()">⤓ 最新</button>
+  </div>
+  <pre class="logs" id="logsBox">加载中…</pre>
+  <div class="toolbar" style="margin-top:10px">
+    <button class="btn secondary" onclick="closeLogs()">关闭</button>
+    <span class="sub" id="logsHint">实时模式: 每 5 秒自动刷新(内存缓存最近 300 条)</span>
+  </div>
+</dialog>
+
+<dialog id="errModal">
+  <h2>⚠ 错误详情 <span id="errEmail" style="color:var(--acc)"></span></h2>
+  <div class="sub" id="errTime" style="margin-bottom:8px"></div>
+  <pre class="errbox" id="errBox"></pre>
+  <div class="toolbar" style="margin-top:10px">
+    <button class="btn secondary" onclick="copyErrText()">📋 复制</button>
+    <button class="btn secondary" onclick="closeErrModal()">关闭</button>
+    <span class="sub">来自最近一次运行/体检的失败信息, 重跑成功后自动清除</span>
+  </div>
+</dialog>
+
+<dialog id="cfModal" class="mini">
+  <h2 id="cfTitle">确认操作</h2>
+  <div class="cf-body" id="cfBody"></div>
+  <div style="text-align:right;display:flex;gap:8px;justify-content:flex-end">
+    <button class="btn secondary" onclick="cfCancel()">取消</button>
+    <button class="btn" id="cfOk" onclick="cfYes()">确认</button>
+  </div>
+</dialog>
+
+<dialog id="prModal" class="mini">
+  <h2 id="prTitle">输入</h2>
+  <div class="cf-body"><input type="text" id="prInput" autocomplete="off"></div>
+  <div style="text-align:right;display:flex;gap:8px;justify-content:flex-end">
+    <button class="btn secondary" onclick="prCancel()">取消</button>
+    <button class="btn" id="prOk" onclick="prYes()">确定</button>
+  </div>
+</dialog>
 <script>
 'use strict';
-var API = { overview:'/api/overview', pushConfig:'/api/push-config', pushTest:'/api/push-test', start:'/api/start', stop:'/api/stop', loginCheck:'/api/login-check', loginCheckStatus:'/api/login-check/status', syncAll:'/api/sync-all', marketProbe:'/api/market-probe', marketProbeStatus:'/api/market-probe/status', netDiag:'/api/net-diag', netDiagStatus:'/api/net-diag/status', manualLogin:'/api/manual-login', manualLoginStatus:'/api/manual-login/status', manualLoginStop:'/api/manual-login/stop', accountsManage:'/api/accounts-manage', accountsPass:'/api/accounts-manage/password', accountsGeo:'/api/accounts-manage/geo', capabilities:'/api/capabilities', schedule:'/api/capabilities/schedule', accountLogs:'/api/account-logs', accountLogDates:'/api/account-log-dates', accountHistory:'/api/account-history' };
+var API = { overview:'/api/overview', trends:'/api/trends', pushConfig:'/api/push-config', pushTest:'/api/push-test', start:'/api/start', stop:'/api/stop', loginCheck:'/api/login-check', loginCheckStatus:'/api/login-check/status', syncAll:'/api/sync-all', marketProbe:'/api/market-probe', marketProbeStatus:'/api/market-probe/status', netDiag:'/api/net-diag', netDiagStatus:'/api/net-diag/status', manualLogin:'/api/manual-login', manualLoginStatus:'/api/manual-login/status', manualLoginStop:'/api/manual-login/stop', accountsManage:'/api/accounts-manage', accountsPass:'/api/accounts-manage/password', accountsGeo:'/api/accounts-manage/geo', capabilities:'/api/capabilities', schedule:'/api/capabilities/schedule', accountLogs:'/api/account-logs', accountLogDates:'/api/account-log-dates', accountHistory:'/api/account-history' };
 var selected = {};
 var selectionReady = false; // 首次拿到账号列表时默认全选, 之后尊重用户的选择
 var accountsCache = [];
 var runCache = null;
+var scheduleCache = null;
+var accFilter = 'all';
 
-// ---- 自动刷新间隔(可调, 存 localStorage) ----
+function $(id) { return document.getElementById(id); }
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+function fmtTs(ts) {
+  if (!ts) return '-';
+  var d = new Date(ts);
+  var p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return (d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+function fmtAgo(ts, now) {
+  if (!ts) return '';
+  var d = (now || Date.now()) - ts;
+  if (d < 0) d = 0;
+  if (d < 60000) return Math.max(1, Math.floor(d / 1000)) + ' 秒前';
+  if (d < 3600000) return Math.floor(d / 60000) + ' 分钟前';
+  if (d < 86400000) return Math.floor(d / 3600000) + ' 小时前';
+  return Math.floor(d / 86400000) + ' 天前';
+}
+function fmtDur(min) {
+  var h = Math.floor(min / 60), m = Math.round(min % 60);
+  return h > 0 ? (h + ' 小时 ' + m + ' 分钟') : (m + ' 分钟');
+}
+function fmtNum(n) {
+  if (n == null || isNaN(n)) return '-';
+  return Number(n).toLocaleString('zh-CN');
+}
+
+// ---- 主题 ----
+function toggleTheme() {
+  var cur = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', cur);
+  try { localStorage.setItem('msrTheme', cur); } catch (e) { /* ignore */ }
+  var b = $('btnTheme'); if (b) b.textContent = cur === 'dark' ? '🌙' : '☀️';
+  renderTrendsChart(); // 主题色相关的内联 SVG 需重画
+}
+(function () { var b = $('btnTheme'); if (b) b.textContent = document.documentElement.getAttribute('data-theme') === 'dark' ? '🌙' : '☀️'; })();
+
+// ---- Toast / 页内确认 / 页内输入 ----
+function toast(msg, ok) {
+  var host = $('toasts');
+  if (!host) { alert(msg); return; }
+  var t = document.createElement('div');
+  t.className = 'toast ' + (ok === false ? 'err' : (ok ? 'ok' : ''));
+  t.textContent = msg;
+  host.appendChild(t);
+  setTimeout(function () { t.style.transition = 'opacity .3s'; t.style.opacity = '0'; setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 320); }, 4200);
+}
+var cfCb = null;
+function uiConfirm(msg, cb, opt) {
+  opt = opt || {};
+  $('cfTitle').textContent = opt.title || '确认操作';
+  $('cfBody').innerHTML = msg;
+  $('cfOk').className = 'btn' + (opt.danger ? ' danger' : '');
+  $('cfOk').textContent = opt.okText || '确认';
+  cfCb = cb;
+  var dlg = $('cfModal');
+  if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
+}
+function cfCancel() { cfCb = null; var d = $('cfModal'); if (d.close) d.close(); else d.removeAttribute('open'); }
+function cfYes() { var cb = cfCb; cfCancel(); if (cb) cb(); }
+var prCb = null;
+function uiPrompt(title, value, cb, opts) {
+  opts = opts || {};
+  $('prTitle').textContent = title;
+  var inp = $('prInput');
+  inp.type = opts.password ? 'password' : 'text';
+  inp.value = value || '';
+  inp.placeholder = opts.placeholder || '';
+  prCb = cb;
+  var dlg = $('prModal');
+  if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
+  setTimeout(function () { inp.focus(); inp.select(); }, 60);
+}
+function prCancel() { prCb = null; var d = $('prModal'); if (d.close) d.close(); else d.removeAttribute('open'); }
+function prYes() { var v = $('prInput').value; var cb = prCb; prCancel(); if (cb) cb(v); }
+(function () {
+  var pi = $('prInput');
+  if (pi) pi.addEventListener('keydown', function (e) { if (e.key === 'Enter') prYes(); });
+})();
+
+// ---- 自动刷新 ----
 var refreshMs = 15000;
 var refreshTimer = null;
 try {
@@ -2284,11 +2686,9 @@ function updateIvUi() {
   $('ivCur').textContent = refreshMs > 0 ? ((refreshMs / 1000) + ' 秒') : '已关闭';
   $('footRefresh').textContent = refreshMs > 0 ? ('每 ' + (refreshMs / 1000) + ' 秒自动刷新') : '自动刷新已关闭';
 }
-function manualRefresh() { scheduleRefresh(); }
+function manualRefresh() { scheduleRefresh(); loadTrends(); }
 function toggleMenu(ev) { ev.stopPropagation(); $('menuDrop').classList.toggle('show'); updateIvUi(); }
 function closeMenu() { $('menuDrop').classList.remove('show'); }
-
-function $(id) { return document.getElementById(id); }
 
 function apiFetch(url, opts, timeoutMs) {
   opts = opts || {};
@@ -2301,46 +2701,15 @@ function apiFetch(url, opts, timeoutMs) {
     return r.json();
   }, function (e) { clearTimeout(timer); throw e; });
 }
-function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
-function fmtTs(ts) {
-  if (!ts) return '-';
-  var d = new Date(ts);
-  var p = function (n) { return (n < 10 ? '0' : '') + n; };
-  return (d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
-}
-function fmtAgo(ts, now) {
-  if (!ts) return '';
-  var d = (now || Date.now()) - ts;
-  if (d < 0) d = 0;
-  if (d < 60000) return Math.max(1, Math.floor(d / 1000)) + ' 秒前';
-  if (d < 3600000) return Math.floor(d / 60000) + ' 分钟前';
-  if (d < 86400000) return Math.floor(d / 3600000) + ' 小时前';
-  return Math.floor(d / 86400000) + ' 天前';
-}
-function fmtDur(min) {
-  var h = Math.floor(min / 60), m = min % 60;
-  return h > 0 ? (h + ' 小时 ' + m + ' 分钟') : (m + ' 分钟');
-}
-function fmtNum(n) {
-  if (n == null || isNaN(n)) return '-';
-  return Number(n).toLocaleString('zh-CN');
-}
 
-function badge(status, liveRunning) {
-  if (liveRunning) return '<span class="badge run">运行中</span>';
-  if (status === 'running') return '<span class="badge run">运行中</span>';
-  if (status === 'done') return '<span class="badge ok">已完成</span>';
-  if (status === 'progress') return '<span class="badge progress" title="脚本并未在跑该账号: 任务体检显示部分完成(未全部通过), 点 🩺 可复查">部分完成</span>';
-  if (status === 'sync-pending') return '<span class="badge" title="该账号已运行完成, 任务完成度将在自动同步后显示(也可点 🩺 立即刷新)">已运行·待同步</span>';
-  return '<span class="badge">待开始</span>';
-}
-
+// ---- 概览渲染 ----
 function renderOverview(d) {
   var now = d.serverTime || Date.now();
   var run = d.run || {};
   var sum = d.summary || {};
   accountsCache = d.accounts || [];
   runCache = run;
+  scheduleCache = d.schedule || scheduleCache;
   if (!selectionReady && accountsCache.length) {
     for (var si = 0; si < accountsCache.length; si++) selected[accountsCache[si].index] = true;
     selectionReady = true;
@@ -2348,15 +2717,25 @@ function renderOverview(d) {
 
   var running = run.running === true;
   var conn = $('conn');
-  conn.textContent = '已连接';
-  conn.className = 'status-pill';
+  conn.innerHTML = '<span class="dot"></span>已连接';
+  conn.className = 'pill on';
   var rs = $('runState');
-  rs.textContent = running ? '运行中' : '空闲';
-  rs.className = 'status-pill ' + (running ? 'running' : '');
+  rs.innerHTML = '<span class="dot"></span>' + (running ? '运行中' : '空闲');
+  rs.className = 'pill ' + (running ? 'run' : '');
 
   $('sumAccounts').textContent = (sum.count != null ? sum.count : accountsCache.length) + ' 个';
+  var badN = 0;
+  for (var bi = 0; bi < accountsCache.length; bi++) if (accBad(accountsCache[bi])) badN++;
+  $('sumAccountsNote').textContent = badN ? ('⚠ ' + badN + ' 个需关注') : '全部正常';
+  $('sumAccountsNote').style.color = badN ? 'var(--warn)' : 'var(--muted)';
   $('sumBalance').textContent = fmtNum(sum.totalBalance);
+  var oldestTs = null;
+  for (var oi = 0; oi < accountsCache.length; oi++) if (accountsCache[oi].balanceTs && (!oldestTs || accountsCache[oi].balanceTs < oldestTs)) oldestTs = accountsCache[oi].balanceTs;
+  $('sumBalNote').textContent = oldestTs ? ('截至 ' + fmtAgo(oldestTs, now)) : '';
   $('sumToday').textContent = '+' + fmtNum(sum.totalToday);
+  var bonusSum = 0;
+  for (var zi = 0; zi < accountsCache.length; zi++) bonusSum += (accountsCache[zi].bonusCollected || 0);
+  $('sumTodayNote').textContent = bonusSum > 0 ? ('含一次性奖励 ' + fmtNum(bonusSum)) : '约 100-170 分/号为正常基线';
   $('todayLabel').textContent = d.today || '';
 
   var sb = $('btnSync');
@@ -2373,75 +2752,186 @@ function renderOverview(d) {
     }
   }
 
-  var ri = $('runInfo');
-  if (running) {
-    // 当前账号实时得分与整轮累计分开显示, 避免把整轮合计误读成正在跑的账号的得分
-    var curAcc = null;
-    for (var ci = 0; ci < accountsCache.length; ci++) if (accountsCache[ci].email === run.currentAccount) { curAcc = accountsCache[ci]; break; }
-    var curGain = (curAcc && curAcc.liveCollected != null) ? curAcc.liveCollected : null;
-    ri.innerHTML = '正在跑: ' + esc(run.currentAccount || '-') +
-      (curGain != null ? '（本号 +' + fmtNum(curGain) + '）' : '') +
-      '<br>本轮合计 +' + fmtNum(run.collected);
-    var bits = [];
-    // 容器 API 的 startedAt 是 ISO 字符串, 必须经 Date.parse, 直接数字相减会得 NaN
-    var runStartTs = Date.parse(run.startedAt);
-    if (!isNaN(runStartTs)) {
-      var elMin = Math.max(0, Math.round((now - runStartTs) / 60000));
-      bits.push('已运行 ' + fmtDur(elMin));
-    }
-    var eta = d.eta;
-    if (eta && eta.etaTs) {
-      var d2 = new Date(eta.etaTs);
-      var p2 = function (n) { return (n < 10 ? '0' : '') + n; };
-      bits.push('预计 ' + p2(d2.getHours()) + ':' + p2(d2.getMinutes()) + ' 完成（剩 ' + fmtDur(eta.remainMin) + '，均值 ' + eta.meanMin + ' 分/账号）');
-    }
-    if (bits.length) ri.innerHTML += '<br><span class="sub">' + bits.join(' · ') + '</span>';
-  } else if (run.collected != null) {
-    ri.innerHTML = '上次运行 +' + fmtNum(run.collected) + '<br><span class="sub">' + (run.startedAt ? fmtTs(run.startedAt) : '') + '</span>';
-  } else {
-    ri.textContent = '空闲';
-  }
-
+  renderRunStrip(run, d, now);
+  renderNextRun(now);
   renderAccounts(now);
   renderSchedule(d.schedule);
   renderHistory(d.history || []);
   updateSelUi();
 }
 
-function renderAccounts(now) {
-  var box = $('accRows');
-  if (!accountsCache.length) { box.innerHTML = '<tr><td colspan="10" class="empty">暂无账号数据</td></tr>'; return; }
-  var html = '';
+// ---- 运行条(运行进度) ----
+function renderRunStrip(run, d, now) {
+  var strip = $('runStrip');
+  var running = run.running === true;
+  var bits = [];
+  if (running) {
+    var curAcc = null;
+    for (var ci = 0; ci < accountsCache.length; ci++) if (accountsCache[ci].email === run.currentAccount) { curAcc = accountsCache[ci]; break; }
+    var curGain = (curAcc && curAcc.liveCollected != null) ? curAcc.liveCollected : null;
+    $('rsTitle').textContent = '▶ 运行中 · 本轮合计 +' + fmtNum(run.collected);
+    $('rsCur').innerHTML = '正在跑 ' + esc(run.currentAccount || '-') + (curGain != null ? '（本号 +' + fmtNum(curGain) + '）' : '');
+    // 容器 API 的 startedAt 是 ISO 字符串, 必须经 Date.parse, 直接数字相减会得 NaN
+    var runStartTs = Date.parse(run.startedAt);
+    if (!isNaN(runStartTs)) bits.push('已运行 ' + fmtDur(Math.max(0, Math.round((now - runStartTs) / 60000))));
+    var eta = d.eta;
+    if (eta && eta.etaTs) {
+      var d2 = new Date(eta.etaTs);
+      var p2 = function (n) { return (n < 10 ? '0' : '') + n; };
+      bits.push('预计 ' + p2(d2.getHours()) + ':' + p2(d2.getMinutes()) + ' 完成（剩 ' + fmtDur(eta.remainMin) + '，均值 ' + eta.meanMin + ' 分/账号）');
+    }
+    var done = run.doneCount != null ? run.doneCount : 0;
+    var total = run.totalCount != null ? run.totalCount : 0;
+    if (total > 0) {
+      bits.unshift('账号 ' + done + '/' + total);
+      var pct = Math.min(100, Math.round(done * 100 / total));
+      $('rsBar').style.display = '';
+      $('rsBar').className = 'pbar running';
+      $('rsFill').style.width = pct + '%';
+      $('rsTitle').textContent = '▶ 运行中 ' + done + '/' + total + ' · 本轮合计 +' + fmtNum(run.collected);
+    } else {
+      $('rsBar').style.display = 'none';
+    }
+    strip.className = 'runstrip';
+    document.title = '▶ 运行中 +' + fmtNum(run.collected) + ' · MS-Rewards';
+  } else {
+    $('rsCur').textContent = '';
+    $('rsBar').style.display = 'none';
+    strip.className = 'runstrip idle';
+    if (run.collected != null && run.startedAt) {
+      $('rsTitle').textContent = '上次运行 +' + fmtNum(run.collected);
+      bits.push(fmtTs(run.startedAt));
+    } else {
+      $('rsTitle').textContent = '空闲';
+    }
+    document.title = 'MS-Rewards 积分看板';
+  }
+  $('rsMeta').textContent = bits.join(' · ');
+}
+
+// ---- 下次定时运行倒计时(每日 cron) ----
+function renderNextRun(now) {
+  var el = $('nextRun'), note = $('nextRunNote');
+  var sch = scheduleCache;
+  if (!sch) { el.textContent = '-'; note.textContent = ''; return; }
+  if (sch.enabled === false) { el.textContent = '已停用'; note.textContent = 'cron ' + (sch.cron || '-'); return; }
+  var parts = String(sch.cron || '').split(' ');
+  if (parts.length === 5 && parts[2] === '*' && parts[3] === '*' && parts[4] === '*' && /^[0-9]+$/.test(parts[1]) && /^[0-9]+$/.test(parts[0])) {
+    var hh = parseInt(parts[1], 10), mm = parseInt(parts[0], 10);
+    var tgt = new Date(now);
+    tgt.setHours(hh, mm, 0, 0);
+    if (tgt.getTime() <= now) tgt = new Date(tgt.getTime() + 86400000);
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    el.textContent = p(tgt.getHours()) + ':' + p(tgt.getMinutes());
+    var diffMin = Math.max(0, Math.round((tgt.getTime() - now) / 60000));
+    note.textContent = '还有 ' + (diffMin >= 60 ? (Math.floor(diffMin / 60) + ' 小时 ' + (diffMin % 60) + ' 分') : (diffMin + ' 分钟')) + (runCache && runCache.running ? '（当前正在运行）' : '');
+  } else {
+    el.textContent = 'cron';
+    note.textContent = sch.cron || '-';
+  }
+}
+
+// ---- 账号卡片 ----
+function accBad(a) {
+  return !!(a.lastError || a.validity === 'need-reauth' || (a.market && a.market.banned === true));
+}
+function accUndone(a) {
+  var tk = a.todayTasks;
+  if (!tk) return a.status === 'progress' || a.status === 'sync-pending' || a.status === 'notstarted';
+  if (tk.allDone) return false;
+  var tt = (tk.dailysetTotal || 0) + (tk.searchTotal || 0) + (tk.punchTotal || 0);
+  return tt > 0;
+}
+function accMatchFilter(a) {
+  if (accFilter === 'all') return true;
+  if (accFilter === 'bad') return accBad(a);
+  if (accFilter === 'run') return a.status === 'running';
+  if (accFilter === 'undone') return accUndone(a);
+  if (accFilter === 'done') return a.todayTasks && a.todayTasks.allDone;
+  return true;
+}
+function setFilter(f) {
+  accFilter = f;
+  var chips = document.querySelectorAll('#chips .chip');
+  for (var i = 0; i < chips.length; i++) chips[i].className = 'chip' + (chips[i].getAttribute('data-f') === f ? ' active' : '');
+  renderAccounts(Date.now());
+}
+function visibleAccounts() {
+  var q = '';
+  var qs = $('fsearch');
+  if (qs) q = qs.value.trim().toLowerCase();
+  var list = [];
   for (var i = 0; i < accountsCache.length; i++) {
     var a = accountsCache[i];
-    var rowNo = i + 1;
+    if (!accMatchFilter(a)) continue;
+    if (q && String(a.email || '').toLowerCase().indexOf(q) < 0) continue;
+    list.push(a);
+  }
+  var order = $('forder') ? $('forder').value : 'idx';
+  if (order === 'bal') list.sort(function (x, y) { return (y.balance || 0) - (x.balance || 0); });
+  else if (order === 'today') list.sort(function (x, y) { return (y.todayCollected || 0) - (x.todayCollected || 0); });
+  else if (order === 'act') list.sort(function (x, y) { return (y.lastRunTs || 0) - (x.lastRunTs || 0); });
+  return list;
+}
+function statusInfo(a, liveRunning) {
+  if (liveRunning || a.status === 'running') return { cls: 'run', dot: 'run', text: '运行中' };
+  if (a.status === 'done') return { cls: 'ok', dot: 'ok', text: '已完成' };
+  if (a.status === 'progress') return { cls: 'part', dot: 'part', text: '部分完成' };
+  if (a.status === 'sync-pending') return { cls: '', dot: '', text: '待同步' };
+  if (a.lastError) return { cls: 'bad', dot: 'bad', text: '失败' };
+  return { cls: '', dot: '', text: '待开始' };
+}
+function renderAccounts(now) {
+  var box = $('accGrid');
+  // 筛选计数
+  var cnt = { all: accountsCache.length, bad: 0, run: 0, undone: 0, done: 0 };
+  for (var ci = 0; ci < accountsCache.length; ci++) {
+    var ca = accountsCache[ci];
+    if (accBad(ca)) cnt.bad++;
+    if (ca.status === 'running') cnt.run++;
+    if (accUndone(ca)) cnt.undone++;
+    if (ca.todayTasks && ca.todayTasks.allDone) cnt.done++;
+  }
+  $('fc-all').textContent = cnt.all ? '(' + cnt.all + ')' : '';
+  $('fc-bad').textContent = cnt.bad ? '(' + cnt.bad + ')' : '';
+  $('fc-run').textContent = cnt.run ? '(' + cnt.run + ')' : '';
+  $('fc-undone').textContent = cnt.undone ? '(' + cnt.undone + ')' : '';
+  $('fc-done').textContent = cnt.done ? '(' + cnt.done + ')' : '';
+
+  if (!accountsCache.length) { box.innerHTML = '<div class="grid-empty">暂无账号数据</div>'; return; }
+  var list = visibleAccounts();
+  if (!list.length) { box.innerHTML = '<div class="grid-empty">没有符合当前筛选的账号</div>'; updateSelUi(); return; }
+  var html = '';
+  for (var i = 0; i < list.length; i++) {
+    var a = list[i];
     var liveRunning = !!(runCache && runCache.running && runCache.currentAccount === a.email);
-    var isRunning = liveRunning || a.status === 'running';
     var checked = selected[a.index] ? ' checked' : '';
+    var st = statusInfo(a, liveRunning);
     var bal = (a.balance != null) ? fmtNum(a.balance) : '—';
-    var balTs = a.balanceTs ? '<div class="ts">' + fmtAgo(a.balanceTs, now) + '更新</div>' : '';
+    var balTs = a.balanceTs ? fmtAgo(a.balanceTs, now) + '更新' : '暂无实测';
     var today = '+' + fmtNum(a.todayCollected || 0);
-    if (a.bonusCollected > 0) {
-      today += '<div class="ts" title="脚本今日经「领取全部待领奖励」领取的一次性积分(已含在上方总数内)">含一次性奖励 ' + fmtNum(a.bonusCollected) + '</div>';
-    }
-    var live = (a.liveCollected != null && isRunning) ? '<div class="ts">本次 +' + fmtNum(a.liveCollected) + '</div>' : '';
+    var todayNote = (a.bonusCollected > 0 ? '含一次性 ' + fmtNum(a.bonusCollected) : '') + (liveRunning && a.liveCollected != null ? (a.bonusCollected > 0 ? ' · ' : '') + '本次 +' + fmtNum(a.liveCollected) : '');
+    // 任务进度块
+    var taskHtml = '';
     var tk = a.todayTasks;
-    var taskCell = '<span class="ts" title="今日还没有微软接口实测数据: 点 🩺 体检或 🔄 同步余额 获取">—</span>';
-    if (a.validity === 'no-session') taskCell = '<span class="ts" title="该账号尚未登录过, 没有可查询的会话">未登录</span>';
-    else if (a.tasksNA) taskCell = '<span class="ts" title="微软接口不返回该账号的任务明细(余额已实测同步), 状态按运行结果显示">余额已同步</span>';
-    if (tk) {
+    if (a.validity === 'no-session') {
+      taskHtml = '<div class="ts" title="该账号尚未登录过, 没有可查询的会话">未登录, 无任务数据</div>';
+    } else if (a.tasksNA) {
+      taskHtml = '<div class="ts" title="微软接口不返回该账号的任务明细(余额已实测同步)">该账号无任务明细, 状态按运行结果显示</div>';
+    } else if (!tk) {
+      taskHtml = '<div class="ts" title="今日还没有微软接口实测数据: 点 🩺 体检或 🔄 同步余额 获取">今日未实测, 点 🩺 或 🔄 获取</div>';
+    } else {
       var dn = (tk.dailysetDone || 0) + (tk.searchDone || 0) + (tk.punchDone || 0);
       var tt = (tk.dailysetTotal || 0) + (tk.searchTotal || 0) + (tk.punchTotal || 0);
+      var pct = tt > 0 ? Math.round(dn * 100 / tt) : 0;
       var detail = '每日任务 ' + (tk.dailysetDone || 0) + '/' + (tk.dailysetTotal || 0)
         + ' · 搜索 ' + (tk.searchDone || 0) + '/' + (tk.searchTotal || 0)
-        + ' · 打卡 ' + (tk.punchDone || 0) + '/' + (tk.punchTotal || 0);
-      taskCell = (tk.allDone ? '<span style="color:var(--ok)"' : '<span') + ' title="' + detail + '(微软接口逐项实测)">' + dn + '/' + tt + '</span>';
+        + ' · 打卡 ' + (tk.punchDone || 0) + '/' + (tk.punchTotal || 0) + '(微软接口逐项实测)';
+      taskHtml = '<div class="tk-line" title="' + esc(detail) + '"><span>任务 <b>' + dn + '/' + tt + '</b></span>'
+        + (tk.allDone ? '<span class="alldone">✓ 全部完成</span>' : '<span>' + pct + '%</span>') + '</div>'
+        + '<div class="tkbar"><div class="fill' + (tk.allDone ? '' : ' part') + '" style="width:' + pct + '%"></div></div>';
     }
-    var act = a.lastRunTs ? fmtTs(a.lastRunTs) + '<div class="ts">' + fmtAgo(a.lastRunTs, now) + '</div>' : '-';
-    var err = a.lastError ? '<span class="errbadge" title="' + esc(a.lastError) + '" onclick="showErrorModal(' + a.index + ')">⚠ 错误</span>' : '<span class="ts" title="最近一次运行无错误">—</span>';
-    // 区域徽章: 市场=兑换目录归属(Switch back 链接判定, 橙=与当前服务区域不一致即迁移未生效);
-    // 服务=flyout 当前服务区域(随出口 IP); 档案=getuserinfo 账号资料国家(多数账号接口被拒则无);
-    // 封禁=flyout isRewardsUser=false(积分商城资格暂停, 红标)
+    // 区域/封禁行
     var regionHtml = '';
     if (a.market) {
       var mk = a.market;
@@ -2452,34 +2942,38 @@ function renderAccounts(now) {
         + (mk.banned === true ? ' | ⛔ 账号已被暂停积分商城资格(isRewardsUser=false), 跑动无收益' : (mk.banned === false ? ' | 封禁状态: 正常' : ' | 封禁状态: 本次未能确认(接口未认可会话)'))
         + (mk.checkedAt ? ' | 检测于 ' + fmtTs(mk.checkedAt) : '')
         + (mk.error ? ' | ' + mk.error : '');
-      regionHtml = '<div class="ts" title="' + esc(mkTitle) + '">'
-        + (mk.banned === true ? '<b style="color:var(--err)">⛔ 已封禁</b> · ' : '')
-        + '🌏 市场 <b style="color:' + (mMismatch ? 'var(--warn)' : 'var(--ok)') + '">' + esc(mk.market || '?') + '</b>'
+      regionHtml = '<div class="acc-region" title="' + esc(mkTitle) + '">'
+        + (mk.banned === true ? '<span class="banned">⛔ 已封禁</span> · ' : '')
+        + '🌏 市场 <b class="' + (mMismatch ? 'mk-warn' : 'mk-ok') + '">' + esc(mk.market || '?') + '</b>'
         + ' · 服务 ' + esc(mk.service || '?')
         + (mk.profile ? ' · 档案 ' + esc(mk.profile) : '')
         + '</div>';
     }
-    html += '<tr>'
-      + '<td><input type="checkbox"' + checked + ' onchange="toggleSel(' + a.index + ', this.checked)"></td>'
-      + '<td>' + rowNo + '</td>'
-      + '<td class="em">' + esc(a.email) + regionHtml + '</td>'
-      + '<td class="num">' + bal + balTs + '</td>'
-      + '<td class="num" style="color:var(--ok)">' + today + live + '</td>'
-      + '<td style="font-size:12px">' + taskCell + '</td>'
-      + '<td>' + badge(a.status, liveRunning) + '</td>'
-      + '<td style="font-size:12px">' + act + '</td>'
-      + '<td>' + err + '</td>'
-      + '<td class="rowact">'
-      + '<button class="btn small secondary" title="查看该账号实时运行日志" onclick="openLogs(' + a.index + ')">📜</button> '
-      + '<button class="btn small secondary" title="登录体检: 无头检查会话并刷新实时余额(约 30-60 秒)" onclick="doCheck(' + a.index + ')">🩺</button> '
-      + '<button class="btn small secondary" title="人工登录: 在容器内浏览器完成微软验证, 自动保存会话" onclick="doManualLogin(' + a.index + ')">🔑</button>'
-      + ' <button class="btn small secondary" title="打开兑换页: 用该账号已保存的会话在容器内浏览器打开 rewards 兑换页, 经 noVNC 在网页里浏览/操作" onclick="doRedeem(' + a.index + ')">🛒</button>'
-      + (a.validity === 'need-reauth' ? ' <button class="btn small danger" title="该账号需要重新授权: 点击在容器内浏览器完成微软验证" onclick="doManualLogin(' + a.index + ')">🔐 重新授权</button>' : '')
-      + checkNote(a)
-      + '</td>'
-      + '</tr>';
+    var err = a.lastError ? '<span class="errbadge" title="' + esc(a.lastError) + '" onclick="showErrorModal(' + a.index + ')">⚠ ' + esc(String(a.lastError).slice(0, 18)) + (String(a.lastError).length > 18 ? '…' : '') + '</span>' : '';
+    var act = a.lastRunTs ? '最近活动 ' + fmtAgo(a.lastRunTs, now) : '';
+    html += '<div class="acc' + (selected[a.index] ? ' sel' : '') + (liveRunning ? ' is-run' : '') + (accBad(a) ? ' is-bad' : '') + '">'
+      + '<div class="acc-top">'
+      + '<label class="pick"><input type="checkbox"' + checked + ' onchange="toggleSel(' + a.index + ', this.checked)" title="选择该账号"></label>'
+      + '<div class="acc-name"><div class="acc-email">' + esc(a.email) + '</div>' + regionHtml + '</div>'
+      + '<span class="st ' + st.cls + '" title="' + esc(a.status || '') + '"><span class="dot"></span>' + st.text + '</span>'
+      + '</div>'
+      + '<div class="acc-nums">'
+      + '<div class="numblk"><div class="v">' + bal + '</div><div class="k">余额 · ' + balTs + '</div></div>'
+      + '<div class="numblk"><div class="v ok">' + today + '</div><div class="k">今日' + (todayNote ? ' · ' + esc(todayNote) : '') + '</div></div>'
+      + '</div>'
+      + '<div class="acc-tasks">' + taskHtml + '</div>'
+      + '<div class="acc-meta">' + err + '<span>' + act + '</span>' + checkNote(a) + '</div>'
+      + '<div class="acc-actions">'
+      + '<button class="abtn" title="查看该账号实时运行日志" onclick="openLogs(' + a.index + ')">📜<span class="lb">日志</span></button>'
+      + '<button class="abtn" title="登录体检: 无头检查会话并刷新实时余额(约 30-60 秒)" onclick="doCheck(' + a.index + ')">🩺<span class="lb">体检</span></button>'
+      + '<button class="abtn" title="人工登录: 在容器内浏览器完成微软验证, 自动保存会话" onclick="doManualLogin(' + a.index + ')">🔑<span class="lb">登录</span></button>'
+      + '<button class="abtn" title="打开兑换页: 用该账号已保存的会话在容器内浏览器打开 rewards 兑换页, 经 noVNC 在网页里浏览/操作" onclick="doRedeem(' + a.index + ')">🛒<span class="lb">兑换</span></button>'
+      + (a.validity === 'need-reauth' ? '<button class="abtn danger" title="该账号需要重新授权: 点击在容器内浏览器完成微软验证" onclick="doManualLogin(' + a.index + ')">🔐<span class="lb">重授权</span></button>' : '')
+      + '</div>'
+      + '</div>';
   }
   box.innerHTML = html;
+  updateSelUi();
 }
 
 function renderSchedule(sch) {
@@ -2488,7 +2982,6 @@ function renderSchedule(sch) {
     + ' · 时区: ' + esc(sch.timezone || '-')
     + (sch.skipIfRunning ? ' · 运行中跳过' : '');
 }
-
 function renderHistory(runs) {
   var box = $('histRows');
   if (!runs.length) { box.innerHTML = '<tr><td colspan="5" class="empty">暂无运行记录</td></tr>'; return; }
@@ -2503,18 +2996,18 @@ function renderHistory(runs) {
     }
     html += '<tr><td>' + fmtTs(r.startedAt) + '</td><td>' + (r.endedAt ? fmtTs(r.endedAt) : '-') + '</td>'
       + '<td style="white-space:normal;min-width:220px">' + detail + '</td>'
-      + '<td class="num">+' + fmtNum(r.collected) + '</td><td class="num">' + fmtNum(r.totalBalance) + '</td></tr>';
+      + '<td class="num" style="color:var(--ok)">+' + fmtNum(r.collected) + '</td><td class="num">' + fmtNum(r.totalBalance) + '</td></tr>';
   }
   box.innerHTML = html;
 }
 
-function toggleSel(idx, on) { if (on) selected[idx] = true; else delete selected[idx]; updateSelUi(); }
+// ---- 选择 ----
+function toggleSel(idx, on) { if (on) selected[idx] = true; else delete selected[idx]; renderAccounts(Date.now()); }
 function toggleAll(on) { selectVisible(on); }
 function selectVisible(on) {
-  selected = {};
-  if (on) { for (var i = 0; i < accountsCache.length; i++) selected[accountsCache[i].index] = true; }
+  if (on) { var list = visibleAccounts(); for (var i = 0; i < list.length; i++) selected[list[i].index] = true; }
+  else selected = {};
   renderAccounts(Date.now());
-  updateSelUi();
 }
 function selCount() { var n = 0; for (var k in selected) if (selected[k]) n++; return n; }
 function updateSelUi() {
@@ -2526,12 +3019,114 @@ function updateSelUi() {
     btn.disabled = false;
     btn.textContent = n > 0 ? ('▶ 运行选中(' + n + ')') : ('▶ 运行全部(' + total + ')');
   }
+  var visN = visibleAccounts().length;
   $('selInfo').textContent = n > 0 ? ('已选 ' + n + ' / ' + total + ' 个账号') : '未选择账号时默认运行全部';
   var sa = $('selAll');
-  sa.checked = total > 0 && n === total;
-  sa.indeterminate = n > 0 && n < total;
+  sa.checked = visN > 0 && n >= visN;
+  sa.indeterminate = n > 0 && n < visN;
 }
 
+// ---- 趋势图(纯 SVG 手绘, 无第三方库) ----
+var trendsData = null;
+function loadTrends() {
+  apiFetch(API.trends, null, 8000).then(function (d) {
+    trendsData = d && d.days ? d.days : [];
+    renderTrendsChart();
+    renderSpark();
+  }).catch(function () { $('trendSub').textContent = '趋势数据加载失败'; });
+}
+function themeColor(dark, light) {
+  return document.documentElement.getAttribute('data-theme') === 'dark' ? dark : light;
+}
+function renderSpark() {
+  var el = $('spark');
+  if (!el) return;
+  var pts = [];
+  for (var i = 0; i < trendsData.length; i++) if (trendsData[i].balance != null) pts.push(trendsData[i].balance);
+  if (pts.length < 2) { el.innerHTML = ''; return; }
+  var W = 86, H = 30, pad = 3;
+  var mn = Math.min.apply(null, pts), mx = Math.max.apply(null, pts);
+  if (mx === mn) mx = mn + 1;
+  var step = (W - pad * 2) / (pts.length - 1);
+  var path = '';
+  for (var j = 0; j < pts.length; j++) {
+    var x = pad + j * step;
+    var y = H - pad - ((pts[j] - mn) / (mx - mn)) * (H - pad * 2);
+    path += (j === 0 ? 'M' : ' L') + x.toFixed(1) + ' ' + y.toFixed(1);
+  }
+  var acc = themeColor('#52a8ff', '#0f7adb');
+  var lastX = pad + (pts.length - 1) * step, lastY = H - pad - ((pts[pts.length - 1] - mn) / (mx - mn)) * (H - pad * 2);
+  el.innerHTML = '<path d="' + path + '" fill="none" stroke="' + acc + '" stroke-width="1.6" stroke-linecap="round" opacity=".85"/>'
+    + '<circle cx="' + lastX.toFixed(1) + '" cy="' + lastY.toFixed(1) + '" r="2.4" fill="' + acc + '"/>';
+}
+function renderTrendsChart() {
+  var host = $('trendChart');
+  if (!host) return;
+  if (!trendsData || trendsData.length < 2) { host.innerHTML = '<div class="empty">暂无趋势数据(运行几轮后自动生成)</div>'; $('trendSub').textContent = ''; return; }
+  var days = trendsData.slice(-21);
+  var W = Math.max(680, days.length * 46), H = 190, padL = 44, padR = 56, padT = 18, padB = 30;
+  var iw = W - padL - padR, ih = H - padT - padB;
+  var mx = 10;
+  for (var i = 0; i < days.length; i++) if (days[i].total > mx) mx = days[i].total;
+  mx = Math.ceil(mx / 50) * 50 || 50;
+  var bals = [];
+  for (var j = 0; j < days.length; j++) if (days[j].balance != null) bals.push(days[j].balance);
+  var bmn = bals.length ? Math.min.apply(null, bals) : 0, bmx = bals.length ? Math.max.apply(null, bals) : 1;
+  if (bmx === bmn) bmx = bmn + 1;
+  var bw = Math.min(22, iw / days.length * 0.52);
+  var gap = iw / days.length;
+  var cGrid = themeColor('#1f2a3a', '#e2e8f0');
+  var cText = themeColor('#8a9ab0', '#5f6f85');
+  var cBar = themeColor('#52a8ff', '#0f7adb');
+  var cBarToday = themeColor('#7cc1ff', '#3b9eff');
+  var cLine = themeColor('#3ecf8e', '#0e9f6e');
+  var svg = '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" role="img">';
+  // 网格 + 左轴刻度
+  for (var g = 0; g <= 4; g++) {
+    var gy = padT + ih - (ih * g / 4);
+    svg += '<line x1="' + padL + '" y1="' + gy.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + gy.toFixed(1) + '" stroke="' + cGrid + '" stroke-width="1"/>';
+    svg += '<text x="' + (padL - 6) + '" y="' + (gy + 3.5).toFixed(1) + '" text-anchor="end" font-size="10" fill="' + cText + '">' + Math.round(mx * g / 4) + '</text>';
+  }
+  var today = days[days.length - 1].date;
+  var line = '';
+  var started = false;
+  for (var k = 0; k < days.length; k++) {
+    var d = days[k];
+    var cx = padL + gap * k + gap / 2;
+    var bh = d.total > 0 ? Math.max(2, (d.total / mx) * ih) : 0;
+    var isToday = d.date === today;
+    var tip = d.date + (isToday ? '(今天)' : '') + ' · 获得 +' + fmtNum(d.total);
+    var per = [];
+    var ems = Object.keys(d.byEmail || {});
+    for (var e = 0; e < ems.length; e++) if (d.byEmail[ems[e]] > 0) per.push(ems[e].split('@')[0] + ' +' + d.byEmail[ems[e]]);
+    if (per.length) tip += '\\n' + per.join('  ');
+    if (d.balance != null) tip += '\\n总余额 ' + fmtNum(d.balance);
+    if (bh > 0) svg += '<rect x="' + (cx - bw / 2).toFixed(1) + '" y="' + (padT + ih - bh).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + bh.toFixed(1) + '" rx="3" fill="' + (isToday ? cBarToday : cBar) + '" opacity="' + (isToday ? 1 : .8) + '"><title>' + esc(tip) + '</title></rect>';
+    svg += '<rect x="' + (cx - gap / 2).toFixed(1) + '" y="' + padT + '" width="' + gap.toFixed(1) + '" height="' + ih + '" fill="transparent"><title>' + esc(tip) + '</title></rect>';
+    if (d.balance != null) {
+      var ly = padT + ih - ((d.balance - bmn) / (bmx - bmn)) * ih;
+      line += (started ? ' L' : 'M') + cx.toFixed(1) + ' ' + ly.toFixed(1);
+      started = true;
+    }
+    if (days.length <= 10 || k % Math.ceil(days.length / 8) === 0 || isToday) {
+      svg += '<text x="' + cx.toFixed(1) + '" y="' + (H - 9) + '" text-anchor="middle" font-size="9.5" fill="' + cText + '">' + d.date.slice(5) + '</text>';
+    }
+  }
+  if (started) svg += '<path d="' + line + '" fill="none" stroke="' + cLine + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" opacity=".9"/>';
+  // 右轴余额首尾标注
+  if (bals.length) {
+    svg += '<text x="' + (W - padR + 6) + '" y="' + (padT + 8) + '" font-size="10" fill="' + cLine + '">' + fmtNum(bmx) + '</text>';
+    svg += '<text x="' + (W - padR + 6) + '" y="' + (padT + ih) + '" font-size="10" fill="' + cLine + '">' + fmtNum(bmn) + '</text>';
+  }
+  svg += '</svg>';
+  host.innerHTML = svg;
+  var sum7 = 0;
+  for (var s = Math.max(0, days.length - 7); s < days.length; s++) sum7 += (days[s].total || 0);
+  $('trendSub').textContent = '近 ' + days.length + ' 天 · 近 7 天共 +' + fmtNum(sum7) + ' 分(悬停柱体看每日明细)';
+}
+</script>
+<script>
+'use strict';
 function doRun() {
   var n = selCount();
   var idxs = [];
@@ -2543,28 +3138,30 @@ function doRun() {
       if (names.length < 4) names.push(accountsCache[i2].email);
     }
   }
-  var label = n > 0 ? ('选中的 ' + n + ' 个账号：' + names.join('、') + (n > 4 ? ' 等' : '')) : ('全部 ' + accountsCache.length + ' 个账号');
-  if (!confirm('确认立即运行积分任务？将运行：' + label + '。约 30-60 分钟，可能触发风控，请谨慎。')) return;
-  var body = n > 0 ? JSON.stringify({ indexes: idxs }) : '{}';
-  fetch(API.start, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body })
-    .then(function (r) { return r.json(); })
-    .then(function (d) {
-      if (d && d.error) { alert('触发失败: ' + d.error); return; }
-      var what = '全部账号';
-      if (d && d.selectedAccount && d.selectedAccount.email) what = '单账号: ' + d.selectedAccount.email;
-      else if (d && d.excludedAccounts && d.excludedAccounts.length) what = '已选 ' + (accountsCache.length - d.excludedAccounts.length) + ' 个账号';
-      alert('已触发运行: ' + what);
-      scheduleRefresh();
-    })
-    .catch(function (e) { alert('触发失败: ' + e.message); });
+  var label = n > 0 ? ('选中的 ' + n + ' 个账号：<b>' + names.map(esc).join('、') + '</b>' + (n > 4 ? ' 等' : '')) : ('全部 ' + accountsCache.length + ' 个账号');
+  uiConfirm('确认立即运行积分任务？将运行：' + label + '。<br>约 30-60 分钟，可能触发风控，请谨慎。', function () {
+    var body = n > 0 ? JSON.stringify({ indexes: idxs }) : '{}';
+    fetch(API.start, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.error) { toast('触发失败: ' + d.error, false); return; }
+        var what = '全部账号';
+        if (d && d.selectedAccount && d.selectedAccount.email) what = '单账号: ' + d.selectedAccount.email;
+        else if (d && d.excludedAccounts && d.excludedAccounts.length) what = '已选 ' + (accountsCache.length - d.excludedAccounts.length) + ' 个账号';
+        toast('已触发运行: ' + what, true);
+        scheduleRefresh();
+      })
+      .catch(function (e) { toast('触发失败: ' + e.message, false); });
+  }, { title: '运行积分任务', okText: '▶ 运行' });
 }
 
 function doStop() {
-  if (!confirm('确认停止当前运行？')) return;
-  fetch(API.stop, { method: 'POST' })
-    .then(function (r) { return r.json(); })
-    .then(function (d) { alert('已发送停止'); scheduleRefresh(); })
-    .catch(function (e) { alert('停止失败: ' + e.message); });
+  uiConfirm('确认停止当前运行？', function () {
+    fetch(API.stop, { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { toast('已发送停止指令', true); scheduleRefresh(); })
+      .catch(function (e) { toast('停止失败: ' + e.message, false); });
+  }, { title: '停止运行', okText: '⏹ 停止', danger: true });
 }
 
 // ---- 推送设置(弹窗) ----
@@ -2639,7 +3236,7 @@ function testPush() {
   showPushMsg('发送中…', true);
   fetch(API.pushTest, { method: 'POST' })
     .then(function (r) { return r.json(); })
-    .then(function (d) { showPushMsg(d.ok ? '✅ 测试推送已发送，请查收钉钉' : ('测试失败: ' + String(d.error || d.resp || '').slice(0, 120)), !!d.ok); })
+    .then(function (d) { showPushMsg(d.ok ? '✅ 测试推送已发送，请查收' : ('测试失败: ' + String(d.error || d.resp || '').slice(0, 120)), !!d.ok); })
     .catch(function (e) { showPushMsg('测试失败: ' + e.message, false); });
 }
 function togglePass(id, btn) {
@@ -2654,48 +3251,54 @@ var checkPollTimer = null;
 function checkNote(a) {
   var j = checkJobs[a.index];
   if (!j) return '';
-  if (j.status === 'running') return '<div class="ts" style="color:var(--warn)">🩺 体检中…</div>';
-  if (j.status === 'error') return '<div class="ts" style="color:var(--err)">🩺 ' + esc(j.error || '失败') + '</div>';
+  if (j.status === 'running') return '<span class="ck-note-run">🩺 体检中…</span>';
+  if (j.status === 'error') return '<span class="ck-note-err">🩺 ' + esc(j.error || '失败') + '</span>';
   var r = j.result;
-  if (r && r.loggedIn) return '<div class="ts" style="color:var(--ok)">🩺 正常' + (r.balance != null ? ' · ' + fmtNum(r.balance) + ' 分' : '') + '</div>';
-  return '<div class="ts" style="color:var(--err)">🩺 未登录</div>';
+  if (r && r.loggedIn) return '<span class="ck-note-ok">🩺 正常' + (r.balance != null ? ' · ' + fmtNum(r.balance) + ' 分' : '') + '</span>';
+  return '<span class="ck-note-err">🩺 未登录</span>';
 }
 function doSyncAll() {
-  if (!confirm('同步全部账号的余额与任务完成度?轻量接口实测, 每号约 2 秒。')) return;
-  fetch(API.syncAll, { method: 'POST' })
-    .then(function (r) { return r.json(); })
-    .then(function (d) {
-      if (d && d.error) { alert(d.error); return; }
-      scheduleRefresh();
-    })
-    .catch(function (e) { alert('触发失败: ' + e.message); });
+  uiConfirm('同步全部账号的余额与任务完成度？轻量接口实测, 每号约 2 秒。', function () {
+    fetch(API.syncAll, { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.error) { toast(d.error, false); return; }
+        toast('已开始同步', true);
+        scheduleRefresh();
+      })
+      .catch(function (e) { toast('触发失败: ' + e.message, false); });
+  }, { title: '同步余额', okText: '🔄 同步' });
 }
 
 function doCheck(index) {
   var email = '#' + index;
   for (var i = 0; i < accountsCache.length; i++) if (accountsCache[i].index === index) email = accountsCache[i].email;
-  if (!confirm('对 ' + email + ' 做登录体检?将无头访问一次 Rewards 刷新实时余额, 约 30-60 秒。')) return;
-  fetch(API.loginCheck, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accountIndex: index }) })
-    .then(function (r) { return r.json(); })
-    .then(function (d) {
-      if (d && d.error) { alert(d.error); return; }
-      ensureCheckPoll();
-      scheduleRefresh();
-    })
-    .catch(function (e) { alert('触发失败: ' + e.message); });
+  uiConfirm('对 <b>' + esc(email) + '</b> 做登录体检？将无头访问一次 Rewards 刷新实时余额, 约 30-60 秒。', function () {
+    fetch(API.loginCheck, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accountIndex: index }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.error) { toast(d.error, false); return; }
+        toast('体检已开始', true);
+        ensureCheckPoll();
+        scheduleRefresh();
+      })
+      .catch(function (e) { toast('触发失败: ' + e.message, false); });
+  }, { title: '登录体检', okText: '🩺 体检' });
 }
 
 // ==== 兑换市场/账号区域检测 ====
 var marketPollTimer = null;
 function doMarketProbe() {
-  if (!confirm('检测全部账号的兑换市场与所在区域?每号恢复会话打开一次兑换页, 约 40-60 秒/号, 共约 5 分钟; 仅脚本空闲时可跑。')) return;
-  fetch(API.marketProbe, { method: 'POST' })
-    .then(function (r) { return r.json(); })
-    .then(function (d) {
-      if (d && d.error) { alert(d.error); return; }
-      ensureMarketPoll();
-    })
-    .catch(function (e) { alert('触发失败: ' + e.message); });
+  uiConfirm('检测全部账号的兑换市场与所在区域？每号恢复会话打开一次兑换页, 约 40-60 秒/号, 共约 5 分钟; 仅脚本空闲时可跑。', function () {
+    fetch(API.marketProbe, { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.error) { toast(d.error, false); return; }
+        toast('区域检测已开始', true);
+        ensureMarketPoll();
+      })
+      .catch(function (e) { toast('触发失败: ' + e.message, false); });
+  }, { title: '区域检测', okText: '🌏 检测' });
 }
 function ensureMarketPoll() {
   if (marketPollTimer) return;
@@ -2718,7 +3321,8 @@ function ensureMarketPoll() {
       if (!running && marketPollTimer) {
         clearInterval(marketPollTimer);
         marketPollTimer = null;
-        if (d && d.job && d.job.status === 'error') alert('区域检测失败: ' + (d.job.error || '未知原因'));
+        if (d && d.job && d.job.status === 'error') toast('区域检测失败: ' + (d.job.error || '未知原因'), false);
+        else if (d && d.job && d.job.status === 'done') toast('区域检测完成', true);
         scheduleRefresh();
       }
     }).catch(function () {});
@@ -2731,14 +3335,14 @@ function doNetDiag() {
   fetch(API.netDiag, { method: 'POST' })
     .then(function (r) { return r.json(); })
     .then(function (d) {
-      if (d && d.error) { alert(d.error); return; }
+      if (d && d.error) { toast(d.error, false); return; }
       var nb = $('netDiagBody');
       if (nb) { nb.textContent = '🛰 诊断中(约 30 秒): 正在请求微软域并核对 Clash 连接表…'; }
       var dlg = document.getElementById('netDiagModal');
       if (dlg && !dlg.open) dlg.showModal();
       ensureNetDiagPoll();
     })
-    .catch(function (e) { alert('触发失败: ' + e.message); });
+    .catch(function (e) { toast('触发失败: ' + e.message, false); });
 }
 function ensureNetDiagPoll() {
   if (netDiagPollTimer) return;
@@ -2822,28 +3426,30 @@ var mlPollTimer = null;
 function doManualLogin(index) {
   var email = '#' + index;
   for (var i = 0; i < accountsCache.length; i++) if (accountsCache[i].index === index) email = accountsCache[i].email;
-  if (!confirm('为 ' + email + ' 打开人工登录窗口?将在容器内依次打开移动端/桌面端浏览器, 完成微软登录并停留在 Rewards 页面 5 秒后自动保存。')) return;
-  openMlSession(index, 'login');
+  uiConfirm('为 <b>' + esc(email) + '</b> 打开人工登录窗口？将在容器内依次打开移动端/桌面端浏览器, 完成微软登录并停留在 Rewards 页面 5 秒后自动保存。', function () {
+    openMlSession(index, 'login');
+  }, { title: '人工登录', okText: '🔑 打开' });
 }
 // 打开该账号的兑换页(带已保存会话), 经 noVNC 在网页里浏览/操作
 function doRedeem(index) {
   var email = '#' + index;
   for (var i = 0; i < accountsCache.length; i++) if (accountsCache[i].index === index) email = accountsCache[i].email;
-  if (!confirm('为 ' + email + ' 打开兑换页?将用该账号已保存的会话在容器内浏览器打开 rewards.bing.com/redeem, 你可以在弹窗里浏览和兑换; 结束时点「结束会话」(或等 20 分钟超时), cookie 会自动保存。需要该账号已有登录会话。')) return;
-  openMlSession(index, 'redeem');
+  uiConfirm('为 <b>' + esc(email) + '</b> 打开兑换页？将用该账号已保存的会话在容器内浏览器打开 rewards.bing.com/redeem, 你可以在弹窗里浏览和兑换; 结束时点「结束会话」(或等 20 分钟超时), cookie 会自动保存。需要该账号已有登录会话。', function () {
+    openMlSession(index, 'redeem');
+  }, { title: '打开兑换页', okText: '🛒 打开' });
 }
 function openMlSession(index, mode) {
   fetch(API.manualLogin, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accountIndex: index, mode: mode || 'login' }) })
     .then(function (r) { return r.json(); })
     .then(function (d) {
-      if (d && d.error) { alert(d.error); return; }
+      if (d && d.error) { toast(d.error, false); return; }
       $('mlEmail').textContent = (d.mode === 'redeem' ? '🛒 ' : '') + d.email;
       $('mlFrame').src = '/manual-vnc/' + d.token + '/vnc.html?path=' + encodeURIComponent('manual-vnc/' + d.token + '/websockify') + '&autoconnect=true&resize=scale';
       var dlg = $('mlModal');
       if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
       ensureMlPoll();
     })
-    .catch(function (e) { alert('触发失败: ' + e.message); });
+    .catch(function (e) { toast('触发失败: ' + e.message, false); });
 }
 function ensureMlPoll() {
   if (mlPollTimer) return;
@@ -2853,7 +3459,7 @@ function ensureMlPoll() {
       if (!d.active) {
         clearInterval(mlPollTimer);
         mlPollTimer = null;
-        if (d.done && d.runnerExit === 0) $('mlStatus').textContent = '✅ 人工登录完成, 会话已保存';
+        if (d.done && d.runnerExit === 0) { $('mlStatus').textContent = '✅ 人工登录完成, 会话已保存'; toast('人工登录完成, 会话已保存', true); }
         else if (d.stopped) $('mlStatus').textContent = '会话已中止(未保存完整登录)';
         else if (d.failLog) $('mlStatus').textContent = '❌ ' + d.failLog;
         $('mlFrame').src = 'about:blank';
@@ -2902,6 +3508,7 @@ function renderAcctManage(d) {
     for (var j = 0; j < all.length; j++) if (all[j].email && all[j].email.toLowerCase() === fa.email.toLowerCase()) exists = true;
     if (!exists) all.push({ email: fa.email, geoLocale: fa.geoLocale, hasTotp: fa.hasTotp, fresh: true });
   }
+  acctManageRows = all;
   if (!all.length) { box.innerHTML = '<tr><td colspan="4" class="empty">暂无账号</td></tr>'; return; }
   var html = '';
   for (var k = 0; k < all.length; k++) {
@@ -2933,15 +3540,16 @@ function delAccount(k) {
   var a = acctManageRows[k];
   if (!a) return;
   var email = a.email;
-  if (!confirm('删除账号 ' + email + '？下一次运行起不再执行该账号；重新添加即可恢复。')) return;
-  fetch(API.accountsManage + '/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: email }) })
-    .then(function (r) { return r.json(); })
-    .then(function (d) {
-      if (d && d.error) { showAcctMsg(d.error, false); return; }
-      showAcctMsg('✅ 已删除', true);
-      openAccounts();
-    })
-    .catch(function (e) { showAcctMsg('删除失败: ' + e.message, false); });
+  uiConfirm('删除账号 <b>' + esc(email) + '</b>？下一次运行起不再执行该账号；重新添加即可恢复。', function () {
+    fetch(API.accountsManage + '/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: email }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.error) { showAcctMsg(d.error, false); return; }
+        showAcctMsg('✅ 已删除', true);
+        openAccounts();
+      })
+      .catch(function (e) { showAcctMsg('删除失败: ' + e.message, false); });
+  }, { title: '删除账号', okText: '🗑 删除', danger: true });
 }
 
 // ---- 能力控制 ----
@@ -3029,6 +3637,7 @@ function openLogs(index) {
     if (logsViewDate && logsViewDate === logsNewestDate) loadAccountLog();
   }, 5000);
 }
+function logsJumpEnd() { var b = $('logsBox'); if (b) b.scrollTop = b.scrollHeight; }
 function showErrorModal(index) {
   var a = null;
   for (var i = 0; i < accountsCache.length; i++) if (accountsCache[i].index === index) a = accountsCache[i];
@@ -3040,6 +3649,17 @@ function showErrorModal(index) {
   if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
 }
 function closeErrModal() { $('errModal').close(); }
+function copyErrText() {
+  var txt = $('errBox').textContent;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(txt).then(function () { toast('已复制到剪贴板', true); }, function () { toast('复制失败', false); });
+  } else {
+    var ta = document.createElement('textarea');
+    ta.value = txt; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); toast('已复制到剪贴板', true); } catch (e) { toast('复制失败', false); }
+    document.body.removeChild(ta);
+  }
+}
 
 function fillLogDates(cb) {
   fetch(API.accountLogDates)
@@ -3081,47 +3701,46 @@ function closeLogs() {
   if (dlg.close) dlg.close(); else dlg.removeAttribute('open');
 }
 
-// ---- 账号改密(覆盖层) ----
+// ---- 账号改密 / 改地区(页内输入) ----
 function changePass(k) {
   var a = acctManageRows[k];
   if (!a) return;
-  var np = prompt('为 ' + a.email + ' 设置新的微软账号密码：');
-  if (np == null) return;
-  if (!np) { alert('密码不能为空'); return; }
-  fetch(API.accountsPass, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: a.email, password: np }) })
-    .then(function (r) { return r.json(); })
-    .then(function (d) {
-      if (d && d.ok) alert('✅ 密码已更新，下一次运行自动生效');
-      else alert((d && d.error) || '失败');
-    })
-    .catch(function (e) { alert('失败: ' + e.message); });
+  uiPrompt('为 ' + a.email + ' 设置新的微软账号密码：', '', function (np) {
+    if (!np) { toast('密码不能为空', false); return; }
+    fetch(API.accountsPass, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: a.email, password: np }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.ok) toast('✅ 密码已更新，下一次运行自动生效', true);
+        else toast((d && d.error) || '失败', false);
+      })
+      .catch(function (e) { toast('失败: ' + e.message, false); });
+  }, { password: true, placeholder: '新密码' });
 }
 
-// ---- 账号改地区(覆盖层) ----
 function changeGeo(k) {
   var a = acctManageRows[k];
   if (!a) return;
   var cur = a.geoLocale || 'cn';
-  var v = prompt('为 ' + a.email + ' 设置新的地区代码（如 cn / gb / us / jp / auto）：', cur);
-  if (v == null) return;
-  v = String(v).trim().toLowerCase();
-  if (!v) { alert('地区不能为空'); return; }
-  if (v !== 'auto' && !/^[a-z]{2}(-[a-z]{2})?$/.test(v)) { alert('地区格式不正确，示例: cn / gb / us / auto'); return; }
-  fetch(API.accountsGeo, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: a.email, geoLocale: v }) })
-    .then(function (r) { return r.json(); })
-    .then(function (d) {
-      if (d && d.ok) alert('✅ 地区已更新为 ' + v + '，下一次运行自动生效');
-      else alert((d && d.error) || '失败');
-    })
-    .catch(function (e) { alert('失败: ' + e.message); });
+  uiPrompt('为 ' + a.email + ' 设置新的地区代码（如 cn / gb / us / jp / auto）：', cur, function (v) {
+    v = String(v || '').trim().toLowerCase();
+    if (!v) { toast('地区不能为空', false); return; }
+    if (v !== 'auto' && !/^[a-z]{2}(-[a-z]{2})?$/.test(v)) { toast('地区格式不正确，示例: cn / gb / us / auto', false); return; }
+    fetch(API.accountsGeo, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: a.email, geoLocale: v }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.ok) toast('✅ 地区已更新为 ' + v + '，下一次运行自动生效', true);
+        else toast((d && d.error) || '失败', false);
+      })
+      .catch(function (e) { toast('失败: ' + e.message, false); });
+  }, { placeholder: '地区代码' });
 }
 
 function showDiag() {
   var b = $('diag');
-  b.className = 'msg show err';
+  b.className = 'banner show';
   b.textContent = '无法连接仪表盘 API。常见原因: 浏览器开了代理/Clash 且未放行内网 192.168.100.10；异地(ZeroTier)访问请用 http://192.168.192.10:8300。可用右上角「⚙ 菜单 → 立即刷新」重试。';
 }
-function hideDiag() { $('diag').className = 'msg'; }
+function hideDiag() { $('diag').className = 'banner'; }
 
 function scheduleRefresh() {
   apiFetch(API.overview).then(function (d) {
@@ -3129,8 +3748,8 @@ function scheduleRefresh() {
     hideDiag();
     scheduleNext();
   }).catch(function () {
-    $('conn').textContent = refreshMs > 0 ? '连接失败，5 秒后重试' : '连接失败';
-    $('conn').className = 'status-pill error';
+    $('conn').innerHTML = '<span class="dot"></span>' + (refreshMs > 0 ? '连接失败，5 秒后重试' : '连接失败');
+    $('conn').className = 'pill err';
     showDiag();
     if (refreshMs > 0) refreshTimer = setTimeout(scheduleRefresh, 5000);
   });
@@ -3140,6 +3759,9 @@ document.addEventListener('click', function (e) {
   if (!drop || !drop.classList.contains('show')) return;
   var m = document.querySelector('.menu');
   if (m && !m.contains(e.target)) closeMenu();
+});
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' && document.activeElement && document.activeElement.id === 'fsearch') renderAccounts(Date.now());
 });
 (function () {
   var dlg = $('mlModal');
@@ -3164,6 +3786,7 @@ document.addEventListener('click', function (e) {
 })();
 updateIvUi();
 scheduleRefresh();
+loadTrends();
 // 页面加载即检查一次区域检测状态: 后台正在跑(如每日自动)时恢复按钮为"检测中"
 fetch(API.marketProbeStatus).then(function (r) { return r.json(); }).then(function (d) { if (d && d.running) ensureMarketPoll(); }).catch(function () {});
 // 页面加载显示上次网络诊断结论(按钮悬停可见), 后台正在跑则恢复轮询弹窗
@@ -3178,7 +3801,8 @@ fetch(API.netDiagStatus).then(function (r) { return r.json(); }).then(function (
 }).catch(function () {});
 </script>
 </body>
-</html>`;
+</html>
+`;
 
 // ============ 启动 ============
 if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
