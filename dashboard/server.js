@@ -1407,6 +1407,7 @@ function pruneOldLogFiles() {
   } catch (e) { /* ignore */ }
 }
 function accountLogDates() {
+  pruneOldLogFiles(); // 清理曾是无调用的死代码, "保留 7 天"从未生效(10-16 修复): 每次列日期前先清
   try {
     return fs.readdirSync(SCRIPT_LOGS_DIR)
       .map(f => { const m = /^(\d{4}-\d{2}-\d{2})\.log$/.exec(f); return m ? m[1] : null })
@@ -3857,6 +3858,8 @@ setTimeout(async () => {
 setTimeout(() => { try { taskSyncCatchup('startup'); } catch (e) { /* ignore */ } }, 60000);
 // 启动即测一次市场数据新鲜度(容器重启后 market.json 仍在, 但当天没测过且空闲则补测)
 setTimeout(() => { void marketCatchup('startup'); }, 120000);
+// 启动即清一次超期日志文件(按需调用之外兜底, 保证不留存超过 HISTORY_KEEP_DAYS)
+setTimeout(() => { try { pruneOldLogFiles(); } catch (e) { /* ignore */ } }, 30000);
 log('INFO', 'MS-Rewards dashboard 启动, 端口 ' + PORT + ' (内网无鉴权)');
 log('INFO', '容器 API: ' + API_BASE + (API_TOKEN ? ' (token 已加载)' : ' (⚠ 未读取到 token)'));
 
