@@ -55,6 +55,7 @@ function defaultPushConfig() {
       error:        { enabled: true,  label: '❌ 错误' },
       loginFail:    { enabled: true,  label: '⚠️ 登录/风控异常' },
       dailySummary: { enabled: false, label: '📊 运行摘要' },
+      quarantine:   { enabled: true,  label: '🚧 账号熔断/恢复' },
     },
     email: {
       enabled: false,
@@ -192,10 +193,10 @@ function resolveEventEmail(message, entry) {
   const tag = String((entry && entry.user) || '').toLowerCase();
   return tagEmail.get(tag) || null;
 }
-// 日志消息中提取邮箱(去掉尾部标点, 如 "xxx@qq.com:")
+// 日志消息中提取邮箱(去掉首尾标点/括号, 如 "(xxx@qq.com)" "xxx@qq.com:")
 function extractEmail(message, fallback) {
   const m = String(message || '').match(/(\S+@\S+)/);
-  const em = String(m ? m[1] : (fallback || '')).replace(/[.:,;，。；]+$/, '');
+  const em = String(m ? m[1] : (fallback || '')).replace(/[.:,;，。；]+$/, '').replace(/^[<(（【\[]+/, '');
   return em || null;
 }
 
@@ -352,6 +353,7 @@ function recordEntry(entry) {
     a.lastError = null;
     a.validity = 'valid';
     a.lastRunTs = Date.now();
+    a.failStreak = 0;
     if (state.currentRun) {
       state.currentRun.accounts.push({ email, gained, balance });
       state.currentRun.collected += gained;
@@ -385,12 +387,13 @@ function recordEntry(entry) {
     state.currentRun = { startedAt: Date.now(), accounts: [], collected: 0, finished: false, cur: null };
     saveState();
   } else if (title === 'RUN-END') {
-    // 收尾: 仍处于 running 的账号视为未完成(登录失败被跳过等), 保留其余额仅标记状态
+    // 收尾: RUN-START 已把全部账号置 pending, 此刻仍是 running/failed 的都是本轮内失败(登录被拒/中途崩溃)
     for (const em of Object.keys(state.accounts)) {
       const a = state.accounts[em];
-      if (a && a.lastStatus === 'running') {
+      if (a && (a.lastStatus === 'running' || a.lastStatus === 'failed')) {
         a.lastStatus = 'failed';
         a.lastError = a.lastError || '运行结束但未收到该账号完成事件';
+        a.failStreak = (a.failStreak || 0) + 1;
       }
     }
     if (state.currentRun) {
@@ -413,6 +416,8 @@ function recordEntry(entry) {
     // 运行结束后自动同步各账号实时余额(接口口径; 延迟 90s 等微软侧积分落定)
     scheduleAutoSync(90000);
     saveState();
+    // 熔断评估延后到自动同步(90s)之后, 任务/余额数据落定再判
+    setTimeout(() => { try { evaluateAllHealth('run-end'); } catch (e) { /* ignore */ } }, 180000);
   } else if (title === 'CLAIM-BONUS-POINTS') {
     // "领取全部待领奖励"完成事件: 按账号累计当日一次性奖励(仅 INFO 完成行, 0 分跳过),
     // 前端在"今日获得"下标注"含一次性奖励 X"
@@ -437,6 +442,8 @@ function recordEntry(entry) {
         if (/登录失败|登录超时|身份验证|验证身份|需要验证|账户不存在|couldn't find|登录页|sign-in|login failed/i.test(message)) {
           a.validity = 'need-reauth';
           a.validityTs = Date.now();
+          // 风控信号即时告警(#4): 每账号每天最多一次, 熔断状态由 run-end/market-probe 评估统一处理
+          if (a.riskAlertDate !== todayStr() && !a.quarantine) evaluateAccountHealth(email, 'login-error');
         }
         saveState();
       }
@@ -690,6 +697,7 @@ function startMarketProbe(trigger) {
       marketProbeJob.status = marketProbeJob.result ? 'done' : 'error';
       if (!marketProbeJob.result) marketProbeJob.error = marketProbeJob.error || ('进程退出 code=' + code);
     }
+    if (marketProbeJob.result) setTimeout(() => { try { evaluateAllHealth('market-probe'); } catch (e) { /* ignore */ } }, 3000);
     log('INFO', '区域检测结束: status=' + marketProbeJob.status + (marketProbeJob.error ? ' | ' + marketProbeJob.error : ''));
   });
   return { ok: true, id };
@@ -901,19 +909,30 @@ async function maybeAutoRetryRun(trigger) {
   const retryEmails = [];
   for (const em of Object.keys(state.accounts)) {
     if (accountNeedsRetry(state.accounts[em], t)) retryEmails.push(em);
-  }
-  if (!retryEmails.length) return;
+  }  if (!retryEmails.length) return;
   const accs = await fetchJson('/accounts');
   const list = (((accs || {}).accounts) || []);
-  const retryIndexes = list.filter(x => retryEmails.indexOf(x.email) >= 0).map(x => x.index);
+  // 补跑前置实测(10-16): 候选号先逐个轻量探针刷新任务/余额数据, 再按最新数据筛一遍。
+  // 探针失败不阻断(fail-open, 维持原候选); 状态其实已完成(上轮已做只是数据未落)的号不再白跑
+  const probed = [];
+  for (const em of retryEmails) {
+    try {
+      const r = await runTaskProbe(em);
+      if (r && (r.balance != null || r.tasks)) probed.push(em + '(已实测)');
+    } catch (e) { probed.push(em + '(探针失败, 保留候选)'); }
+  }
+  const fresh = retryEmails.filter(em => accountNeedsRetry(state.accounts[em], t));
+  log('INFO', '补跑前置实测: 候选 ' + retryEmails.length + ' → 实际需补 ' + fresh.length + ' (' + probed.join(', ') + ')');
+  if (!fresh.length) { log('INFO', '前置实测后无需补跑, 已取消'); return; }
+  const retryIndexes = list.filter(x => fresh.indexOf(x.email) >= 0).map(x => x.index);
   if (!retryIndexes.length) return;
   autoRetry.lastDate = t;
   autoRetry.active = true;
   state.autoRetryDate = t; // 持久化: 重启后当日不再重复补跑
   saveState();
-  const excluded = list.filter(x => retryEmails.indexOf(x.email) < 0).map(x => x.index);
+  const excluded = list.filter(x => fresh.indexOf(x.email) < 0).map(x => x.index);
   const payload = excluded.length ? { excludedAccountIndexes: excluded } : {};
-  log('INFO', '任务未完成自动补跑 (' + trigger + '): ' + retryEmails.join(', '));
+  log('INFO', '任务未完成自动补跑 (' + trigger + '): ' + fresh.join(', '));
   await postJson('/start', payload);
 }
 
@@ -1281,6 +1300,123 @@ function writeExtraFile(list) {
     log('ERROR', '写入动态账号文件失败: ' + e.message);
     return false;
   }
+}
+
+// ============ 账号健康熔断(10-16) ============
+// 风控信号 → 自动移出运行名单(含容器 cron 路径, 通过 stash accounts.json 实现) + 即时告警;
+// 恢复 = 人工在看板点「解除」(凭据从 stash 完整归还)。软信号只告警不移出。
+const QUARANTINE_STASH_FILE = path.join(CONFIG_DIR, 'quarantined-accounts.json');
+const QUARANTINE_FAIL_STREAK = 3;
+
+function loadQuarantineStash() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(QUARANTINE_STASH_FILE, 'utf8'));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) { return []; }
+}
+function saveQuarantineStash(list) {
+  fs.writeFileSync(QUARANTINE_STASH_FILE, JSON.stringify(list, null, 2), { mode: 0o600 });
+  try { fs.chmodSync(QUARANTINE_STASH_FILE, 0o600); } catch (e) { /* ignore */ }
+}
+function isQuarantined(em) {
+  const a = state.accounts[em];
+  return !!(a && a.quarantine);
+}
+// 硬熔断: 从 accounts.json 摘出凭据存 stash → 一切运行路径(cron/手动/API)自然跳过
+function stashQuarantineAccount(em) {
+  const list = readExtraFile();
+  const idx = list.findIndex(x => String(x.email || '').toLowerCase() === em.toLowerCase());
+  if (idx < 0) return false; // 不在动态账号文件(如 env 固定账号): 无法摘除, 只能靠告警+状态标记
+  const stash = loadQuarantineStash();
+  if (!stash.some(x => String(x.email || '').toLowerCase() === em.toLowerCase())) stash.push(list[idx]);
+  saveQuarantineStash(stash);
+  list.splice(idx, 1);
+  return writeExtraFile(list);
+}
+// 解除: 凭据从 stash 归还 accounts.json
+function restoreQuarantineAccount(em) {
+  const stash = loadQuarantineStash();
+  const idx = stash.findIndex(x => String(x.email || '').toLowerCase() === em.toLowerCase());
+  if (idx < 0) return false;
+  const list = readExtraFile();
+  if (!list.some(x => String(x.email || '').toLowerCase() === em.toLowerCase())) list.push(stash[idx]);
+  saveQuarantineStash(stash.filter((_, i) => i !== idx));
+  return writeExtraFile(list);
+}
+function quarantineAlert(em, title, lines) {
+  const ev = (pushConfig.events || {}).quarantine;
+  if (ev && ev.enabled === false) return;
+  const text = ['[' + (pushConfig.dingtalk.keyword || 'MS-Rewards') + '] ' + title, ...lines].join('\n');
+  if (pushConfig.dingtalk.enabled && pushConfig.dingtalk.accessToken) {
+    sendDingTalk(text).then(r => log('INFO', (r.ok ? '✓' : '✗') + ' 熔断告警钉钉 ' + em.split('@')[0] + ' -> ' + (r.resp ? r.resp.slice(0, 80) : 'ok')));
+  }
+  if (emailReady()) sendEventEmail([title, ...lines]).then(r => log('INFO', (r.ok ? '✓' : '✗') + ' 熔断告警邮件 ' + em.split('@')[0]));
+}
+// 信号评估: banned=硬熔断(移出名单); 连续失败>=3=硬熔断; need-reauth/no-session=仅告警
+function evaluateAccountHealth(em, trigger) {
+  const a = state.accounts[em];
+  if (!a || em.indexOf('@') < 0) return;
+  const t = todayStr();
+  const md = loadMarketData().accounts || {};
+  const mk = md[em] || {};
+  const banned = mk.banned === true;
+  const hard = banned || (a.failStreak || 0) >= QUARANTINE_FAIL_STREAK;
+  const soft = a.validity === 'need-reauth' || a.validity === 'no-session';
+
+  if (hard) {
+    if (!a.quarantine) {
+      const reason = banned ? 'banned' : 'fail-streak';
+      const detail = banned
+        ? '积分商城资格已被暂停(isRewardsUser=false)' + (mk.checkedAt ? ', 检测于 ' + fmtTsLocal(mk.checkedAt) : '')
+        : '连续 ' + a.failStreak + ' 轮运行失败, 最近错误: ' + String(a.lastError || '未知').slice(0, 120);
+      a.quarantine = { since: Date.now(), reason, detail, trigger: trigger || 'auto' };
+      saveState();
+      const removed = stashQuarantineAccount(em);
+      log('WARN', '账号熔断: ' + em + ' (' + reason + ')' + (removed ? ', 已移出运行名单' : ', 账号不在动态名单, 仅状态标记'));
+      quarantineAlert(em, '🚧 账号熔断: ' + em, [
+        '原因: ' + detail,
+        removed ? '已自动移出运行名单(含每日定时), 凭据已安全暂存'
+                : '⚠ 未能移出运行名单(非动态账号), 请人工处理',
+        '恢复: 看板账号卡「解除熔断」人工确认',
+      ]);
+    }
+    return;
+  }
+  // 已熔断但信号消失(申诉成功 banned 翻转等): 不自动恢复, 提示人工确认
+  if (a.quarantine && banned === false && a.quarantine.reason === 'banned' && mk.banned != null) {
+    if (a.quarantine.recoveredNotified !== true) {
+      a.quarantine.recoveredNotified = true;
+      saveState();
+      quarantineAlert(em, '🔄 熔断账号信号恢复: ' + em, ['最新区域检测显示封禁已解除(isRewardsUser=true)', '确认无其他问题后, 请在看板点「解除熔断」恢复运行']);
+    }
+  }
+  // 软信号: 只告警, 每账号每天最多一次
+  if (soft && !a.quarantine && a.riskAlertDate !== t) {
+    a.riskAlertDate = t;
+    saveState();
+    const why = a.validity === 'need-reauth' ? '会话失效需重新授权(登录挑战/验证卡点)' : '该账号尚未登录过(无会话)';
+    log('WARN', '账号风险告警: ' + em + ' (' + a.validity + ')');
+    quarantineAlert(em, '⚠️ 账号风险: ' + em, [why, '请尽快用看板 🔑 人工登录修复; 连续失败 ' + QUARANTINE_FAIL_STREAK + ' 轮将自动熔断']);
+  }
+}
+function evaluateAllHealth(trigger) {
+  for (const em of Object.keys(state.accounts)) evaluateAccountHealth(em, trigger);
+}
+// 解除熔断 API 的核心(路由层调用): 归还凭据 + 清状态
+function clearQuarantine(em) {
+  const a = state.accounts[em];
+  if (!a || !a.quarantine) return { error: '该账号未处于熔断状态' };
+  const restored = restoreQuarantineAccount(em);
+  a.failStreak = 0;
+  a.riskAlertDate = null;
+  a.lastStatus = 'pending';
+  delete a.quarantine;
+  saveState();
+  log('INFO', '账号解除熔断: ' + em + (restored ? ', 凭据已归还运行名单' : ', 无 stash 记录(可能非动态账号)'));
+  return { ok: true, restored };
+}
+function fmtTsLocal(ts) {
+  try { return new Date(ts).toLocaleString('zh-CN'); } catch (e) { return String(ts); }
 }
 
 // ============ 邮件通知(零依赖 SMTP 客户端, SSL 465 / STARTTLS 587) ============
@@ -1677,6 +1813,8 @@ const server = http.createServer(async (req, res) => {
           lastError: st.lastError || live.error || null,
           lastRunTs: st.lastRunTs || null,
           market: marketByEmail[email] || null,
+          quarantine: st.quarantine || null,
+          failStreak: st.failStreak || 0,
         };
       };
       let all;
@@ -1685,6 +1823,14 @@ const server = http.createServer(async (req, res) => {
           build(acc.index, acc.email, state.accounts[acc.email], liveAccounts.find(x => x.email === acc.email)),
           { extra: Boolean(acc.extra) }
         ));
+        // 熔断账号已被摘出 accounts.json(不在容器 /accounts 里), 从 state 合并回来展示熔断卡
+        let qIdx = 950;
+        for (const em of Object.keys(state.accounts)) {
+          const st = state.accounts[em];
+          if (!st || !st.quarantine || em.indexOf('@') < 0) continue;
+          if (all.some(x => x.email === em)) continue;
+          all.push(Object.assign(build(qIdx++, em, st, null), { extra: true, quarantined: true }));
+        }
       } else {
         // 容器 API 不可达: 用持久化 state 兜底
         all = Object.keys(state.accounts)
@@ -1813,6 +1959,22 @@ const server = http.createServer(async (req, res) => {
         })),
         removed: list.filter(e => e.removed === true).map(e => e.email),
       });
+    }
+    if (p === '/api/quarantine' && req.method === 'GET') {
+      const out = [];
+      for (const em of Object.keys(state.accounts)) {
+        const a = state.accounts[em];
+        if (a && a.quarantine) out.push({ email: em, quarantine: a.quarantine, balance: a.balance || null, lastRunTs: a.lastRunTs || null });
+      }
+      return json(res, 200, { accounts: out });
+    }
+    if (p === '/api/quarantine/clear' && req.method === 'POST') {
+      let body = {};
+      try { body = await readBody(req); } catch (e) { body = {}; }
+      const email = String(body.email || '').trim();
+      if (!email) return json(res, 400, { error: 'email 必填' });
+      const r = clearQuarantine(email);
+      return json(res, r.error ? 400 : 200, r);
     }
     if (p === '/api/accounts-manage' && req.method === 'POST') {
       let body = {};
@@ -2417,6 +2579,7 @@ const HTML = `<!DOCTYPE html>
       <div class="switch-row"><span>❌ 错误</span><label class="switch"><input type="checkbox" id="ev-error"><span class="slider"></span></label></div>
       <div class="switch-row"><span>⚠️ 登录/风控异常</span><label class="switch"><input type="checkbox" id="ev-loginFail"><span class="slider"></span></label></div>
       <div class="switch-row"><span>📊 每日摘要（每天 21:30 推送当日汇总）</span><label class="switch"><input type="checkbox" id="ev-dailySummary"><span class="slider"></span></label></div>
+      <div class="switch-row"><span>🚧 账号熔断/恢复（风控信号自动停跑并告警）</span><label class="switch"><input type="checkbox" id="ev-quarantine"><span class="slider"></span></label></div>
     </div>
   </div>
   <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
@@ -2587,7 +2750,7 @@ const HTML = `<!DOCTYPE html>
 </dialog>
 <script>
 'use strict';
-var API = { overview:'/api/overview', trends:'/api/trends', pushConfig:'/api/push-config', pushTest:'/api/push-test', start:'/api/start', stop:'/api/stop', loginCheck:'/api/login-check', loginCheckStatus:'/api/login-check/status', syncAll:'/api/sync-all', marketProbe:'/api/market-probe', marketProbeStatus:'/api/market-probe/status', netDiag:'/api/net-diag', netDiagStatus:'/api/net-diag/status', manualLogin:'/api/manual-login', manualLoginStatus:'/api/manual-login/status', manualLoginStop:'/api/manual-login/stop', accountsManage:'/api/accounts-manage', accountsPass:'/api/accounts-manage/password', accountsGeo:'/api/accounts-manage/geo', capabilities:'/api/capabilities', schedule:'/api/capabilities/schedule', accountLogs:'/api/account-logs', accountLogDates:'/api/account-log-dates', accountHistory:'/api/account-history' };
+var API = { overview:'/api/overview', trends:'/api/trends', pushConfig:'/api/push-config', pushTest:'/api/push-test', start:'/api/start', stop:'/api/stop', loginCheck:'/api/login-check', loginCheckStatus:'/api/login-check/status', syncAll:'/api/sync-all', marketProbe:'/api/market-probe', marketProbeStatus:'/api/market-probe/status', netDiag:'/api/net-diag', netDiagStatus:'/api/net-diag/status', manualLogin:'/api/manual-login', manualLoginStatus:'/api/manual-login/status', manualLoginStop:'/api/manual-login/stop', quarantine:'/api/quarantine', quarantineClear:'/api/quarantine/clear', accountsManage:'/api/accounts-manage', accountsPass:'/api/accounts-manage/password', accountsGeo:'/api/accounts-manage/geo', capabilities:'/api/capabilities', schedule:'/api/capabilities/schedule', accountLogs:'/api/account-logs', accountLogDates:'/api/account-log-dates', accountHistory:'/api/account-history' };
 var selected = {};
 var selectionReady = false; // 首次拿到账号列表时默认全选, 之后尊重用户的选择
 var accountsCache = [];
@@ -2726,7 +2889,7 @@ function renderOverview(d) {
   runCache = run;
   scheduleCache = d.schedule || scheduleCache;
   if (!selectionReady && accountsCache.length) {
-    for (var si = 0; si < accountsCache.length; si++) selected[accountsCache[si].index] = true;
+    for (var si = 0; si < accountsCache.length; si++) if (!accountsCache[si].quarantine) selected[accountsCache[si].index] = true;
     selectionReady = true;
   }
 
@@ -2848,7 +3011,7 @@ function renderNextRun(now) {
 
 // ---- 账号卡片 ----
 function accBad(a) {
-  return !!(a.lastError || a.validity === 'need-reauth' || (a.market && a.market.banned === true));
+  return !!(a.quarantine || a.lastError || a.validity === 'need-reauth' || (a.market && a.market.banned === true));
 }
 function accUndone(a) {
   var tk = a.todayTasks;
@@ -2919,6 +3082,24 @@ function renderAccounts(now) {
   var html = '';
   for (var i = 0; i < list.length; i++) {
     var a = list[i];
+    // 熔断账号: 专属卡片(不可运行), 展示原因与解除入口
+    if (a.quarantine) {
+      var q = a.quarantine;
+      var qWhy = q.reason === 'banned' ? '⛔ 积分商城资格已暂停' : (q.reason === 'fail-streak' ? '💀 连续 ' + (a.failStreak || 3) + ' 轮运行失败' : esc(q.reason));
+      html += '<div class="acc is-bad acc-quar">'
+        + '<div class="acc-top">'
+        + '<div class="acc-name"><div class="acc-email">' + esc(a.email) + '</div>'
+        + '<div class="acc-region">🚧 熔断于 ' + fmtTs(q.since) + ' · ' + qWhy + '</div>'
+        + '<div class="acc-region" title="' + esc(q.detail || '') + '">' + esc(String(q.detail || '').slice(0, 60)) + (String(q.detail || '').length > 60 ? '…' : '') + '</div></div>'
+        + '<span class="st bad"><span class="dot"></span>已熔断</span>'
+        + '</div>'
+        + '<div class="acc-nums"><div class="numblk"><div class="v">' + (a.balance != null ? fmtNum(a.balance) : '—') + '</div><div class="k">最后已知余额</div></div>'
+        + '<div class="numblk"><div class="v">' + (a.failStreak || 0) + '</div><div class="k">连续失败轮数</div></div></div>'
+        + '<div class="acc-meta"><span class="ts">该账号已自动移出全部运行(含每日定时), 凭据安全暂存; 处理后点「解除熔断」恢复</span></div>'
+        + '<div class="acc-actions"><button class="abtn" title="解除熔断: 凭据归还运行名单, 下一次运行自动恢复" onclick="clearQuarantine(&quot;' + esc(a.email) + '&quot;)">♻️<span class="lb">解除熔断</span></button></div>'
+        + '</div>';
+      continue;
+    }
     var liveRunning = !!(runCache && runCache.running && runCache.currentAccount === a.email);
     var checked = selected[a.index] ? ' checked' : '';
     var st = statusInfo(a, liveRunning);
@@ -3031,14 +3212,15 @@ function closeHistory() {
 function toggleSel(idx, on) { if (on) selected[idx] = true; else delete selected[idx]; renderAccounts(Date.now()); }
 function toggleAll(on) { selectVisible(on); }
 function selectVisible(on) {
-  if (on) { var list = visibleAccounts(); for (var i = 0; i < list.length; i++) selected[list[i].index] = true; }
+  if (on) { var list = visibleAccounts(); for (var i = 0; i < list.length; i++) if (!list[i].quarantine) selected[list[i].index] = true; }
   else selected = {};
   renderAccounts(Date.now());
 }
 function selCount() { var n = 0; for (var k in selected) if (selected[k]) n++; return n; }
 function updateSelUi() {
   var n = selCount();
-  var total = accountsCache.length;
+  var total = 0;
+  for (var ti = 0; ti < accountsCache.length; ti++) if (!accountsCache[ti].quarantine) total++;
   var btn = $('btnRun');
   if (total === 0) { btn.disabled = true; btn.textContent = '▶ 运行'; }
   else {
@@ -3153,6 +3335,20 @@ function renderTrendsChart() {
 </script>
 <script>
 'use strict';
+// ---- 熔断解除 ----
+function clearQuarantine(email) {
+  uiConfirm('解除 <b>' + esc(email) + '</b> 的熔断？凭据将归还运行名单, 下一次运行自动恢复执行。请确认已处理风控问题(如完成人工登录/申诉解封)。', function () {
+    fetch(API.quarantineClear, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: email }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.error) { toast('解除失败: ' + d.error, false); return; }
+        toast('✅ 已解除熔断, 下一次运行自动恢复', true);
+        scheduleRefresh();
+      })
+      .catch(function (e) { toast('解除失败: ' + e.message, false); });
+  }, { title: '解除熔断', okText: '♻️ 解除', danger: true });
+}
+
 function doRun() {
   var n = selCount();
   var idxs = [];
@@ -3215,6 +3411,7 @@ function loadPushForm(c) {
   $('ev-error').checked = !(ev.error && ev.error.enabled === false);
   $('ev-loginFail').checked = !(ev.loginFail && ev.loginFail.enabled === false);
   $('ev-dailySummary').checked = !!(ev.dailySummary && ev.dailySummary.enabled === true);
+  $('ev-quarantine').checked = !(ev.quarantine && ev.quarantine.enabled === false);
   var em = c.email || {};
   $('emEnabled').checked = !!em.enabled;
   $('emHost').value = em.smtpHost || 'smtp.qq.com';
@@ -3240,6 +3437,7 @@ function collectPush() {
       error: { enabled: $('ev-error').checked },
       loginFail: { enabled: $('ev-loginFail').checked },
       dailySummary: { enabled: $('ev-dailySummary').checked },
+      quarantine: { enabled: $('ev-quarantine').checked },
     },
     email: {
       enabled: $('emEnabled').checked,
@@ -3863,6 +4061,8 @@ setTimeout(() => { try { taskSyncCatchup('startup'); } catch (e) { /* ignore */ 
 setTimeout(() => { void marketCatchup('startup'); }, 120000);
 // 启动即清一次超期日志文件(按需调用之外兜底, 保证不留存超过 HISTORY_KEEP_DAYS)
 setTimeout(() => { try { pruneOldLogFiles(); } catch (e) { /* ignore */ } }, 30000);
+// 启动后评估一遍全账号健康(已有熔断标记的只维护, 新信号才动作; 推送去重防重复告警)
+setTimeout(() => { try { evaluateAllHealth('startup'); } catch (e) { /* ignore */ } }, 45000);
 log('INFO', 'MS-Rewards dashboard 启动, 端口 ' + PORT + ' (内网无鉴权)');
 log('INFO', '容器 API: ' + API_BASE + (API_TOKEN ? ' (token 已加载)' : ' (⚠ 未读取到 token)'));
 
