@@ -2217,9 +2217,7 @@ const HTML = `<!DOCTYPE html>
   .legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
 
   /* ===== 历史 ===== */
-  details.history { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 13px 16px; margin-top: 14px; box-shadow: var(--shadow); }
-  details.history summary { cursor: pointer; font-size: 14px; font-weight: 700; }
-  table.hist { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 10px; }
+  table.hist { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   table.hist th, table.hist td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--border); white-space: nowrap; }
   table.hist th { color: var(--muted); font-weight: 500; font-size: 12px; }
   table.hist tr:last-child td { border-bottom: 0; }
@@ -2295,6 +2293,7 @@ const HTML = `<!DOCTYPE html>
         <button class="menu-item" onclick="openCap(); closeMenu()">🎛 能力控制（并行/词源/调度）</button>
         <button class="menu-item" onclick="openAccounts(); closeMenu()">👥 账号管理（动态添加）</button>
         <button class="menu-item" onclick="openPush(); closeMenu()">🔔 通知设置（钉钉/邮件）</button>
+        <button class="menu-item" onclick="openHistory(); closeMenu()">📜 运行历史与调度</button>
         <button class="menu-item" onclick="manualRefresh(); closeMenu()">⟳ 立即刷新</button>
         <div class="menu-sep"></div>
         <div class="menu-label">自动刷新间隔（当前 <span id="ivCur">15 秒</span>）</div>
@@ -2368,19 +2367,25 @@ const HTML = `<!DOCTYPE html>
     <div class="chart-scroll" id="trendChart"><div class="empty">暂无趋势数据</div></div>
   </section>
 
-  <details class="history">
-    <summary>📜 运行历史（最近 10 次）与调度</summary>
-    <div id="scheduleBox" class="hint" style="margin:8px 0"></div>
-    <table class="hist">
-      <thead><tr><th>开始</th><th>结束</th><th>账号明细</th><th class="num">本次获得</th><th class="num">总余额</th></tr></thead>
-      <tbody id="histRows"><tr><td colspan="5" class="empty">暂无运行记录</td></tr></tbody>
-    </table>
-  </details>
-
   <div class="foot">数据来源: microsoft-rewards-script 容器 API · <span id="footRefresh">每 15 秒自动刷新</span> · ms-rewards-dashboard</div>
 </div>
 
 <div class="toasts" id="toasts"></div>
+
+<dialog id="histModal" style="width:min(880px,94vw)">
+  <h2>📜 运行历史与调度</h2>
+  <div id="scheduleBox" class="hint" style="margin:0 0 8px"></div>
+  <div style="max-height:56vh;overflow:auto;border:1px solid var(--border);border-radius:10px">
+    <table class="hist" style="margin:0">
+      <thead><tr><th>开始</th><th>结束</th><th>账号明细</th><th class="num">本次获得</th><th class="num">总余额</th></tr></thead>
+      <tbody id="histRows"><tr><td colspan="5" class="empty">暂无运行记录</td></tr></tbody>
+    </table>
+  </div>
+  <div class="toolbar" style="margin-top:12px">
+    <button class="btn secondary" onclick="closeHistory()">关闭</button>
+    <span class="sub">最近 10 次 · 数据随页面自动刷新, 重开弹窗即最新</span>
+  </div>
+</dialog>
 
 <dialog id="netDiagModal">
   <h2>🛰 网络诊断</h2>
@@ -3005,6 +3010,17 @@ function renderHistory(runs) {
       + '<td class="num" style="color:var(--ok)">+' + fmtNum(r.collected) + '</td><td class="num">' + fmtNum(r.totalBalance) + '</td></tr>';
   }
   box.innerHTML = html;
+}
+
+// ---- 运行历史/调度弹窗(主页不再常驻, 菜单进入) ----
+function openHistory() {
+  var dlg = $('histModal');
+  if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
+  scheduleRefresh(); // 打开即取最新
+}
+function closeHistory() {
+  var dlg = $('histModal');
+  if (dlg.close) dlg.close(); else dlg.removeAttribute('open');
 }
 
 // ---- 选择 ----
