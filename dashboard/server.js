@@ -98,6 +98,8 @@ function loadState() {
   }
   if (!state.accounts) state.accounts = {};
   if (!state.runs) state.runs = [];
+  // 自动补跑"今日已发起"标记持久化: 进程重启不再重复触发当日补跑(10-16)
+  if (state.autoRetryDate) autoRetry.lastDate = state.autoRetryDate;
   // v2 一次性迁移: 旧格式 { collected, lastUpdateTs, success } → 新字段
   // (旧记录发生在今天才把 collected 计入今日获得; 迁移后删除旧字段, 保证只应用一次)
   if (state.v !== 2) {
@@ -837,7 +839,8 @@ function buildDailySummaryLines() {
     const a = state.accounts[em];
     if (!a) continue;
     const byBal = (a.dayStartDate === t && a.dayStartBalance != null && a.balance != null) ? a.balance - a.dayStartBalance : null;
-    const gain = byBal != null ? byBal : (a.todayCollected || 0);
+    // 回退口径只在 todayDate=今天 时采信(与 /api/trends 一致)
+    const gain = byBal != null ? byBal : ((a.todayDate === t) ? (a.todayCollected || 0) : 0);
     total += gain;
     const flag = (a.lastStatus === 'failed' || a.lastError) ? '⚠️ ' : '';
     lines.push(flag + em.split('@')[0] + ': +' + gain + (a.balance != null ? ' (余额 ' + a.balance + ')' : '') + (a.lastError ? ' | ' + String(a.lastError).slice(0, 60) : ''));
@@ -906,6 +909,8 @@ async function maybeAutoRetryRun(trigger) {
   if (!retryIndexes.length) return;
   autoRetry.lastDate = t;
   autoRetry.active = true;
+  state.autoRetryDate = t; // 持久化: 重启后当日不再重复补跑
+  saveState();
   const excluded = list.filter(x => retryEmails.indexOf(x.email) < 0).map(x => x.index);
   const payload = excluded.length ? { excludedAccountIndexes: excluded } : {};
   log('INFO', '任务未完成自动补跑 (' + trigger + '): ' + retryEmails.join(', '));
@@ -1499,7 +1504,8 @@ const server = http.createServer(async (req, res) => {
       for (const em of Object.keys(state.accounts)) {
         const a = state.accounts[em];
         const byBal = (a.dayStartDate === t && a.dayStartBalance != null && a.balance != null) ? a.balance - a.dayStartBalance : null;
-        const g = byBal != null ? byBal : (a.todayCollected || 0);
+        // 回退口径只在 todayDate=今天 时采信, 防止已移除账号的陈旧累计污染今日合计
+        const g = byBal != null ? byBal : ((a.todayDate === t) ? (a.todayCollected || 0) : 0);
         if (g > 0) { todayBy[em] = g; todayTotal += g; }
       }
       let td = byDay.get(t);
