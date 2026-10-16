@@ -2143,9 +2143,12 @@ const HTML = `<!DOCTYPE html>
   .chip:hover { color: var(--text); }
   .chip.active { background: var(--acc-dim); color: var(--acc); border-color: var(--acc-glow); font-weight: 600; }
   .chip .cnt { font-size: 11px; opacity: .75; margin-left: 3px; }
-  .tsearch { display: flex; align-items: center; gap: 6px; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 10px; padding: 5px 10px; }
-  .tsearch input { border: 0; background: none; color: var(--text); font-size: 13px; width: 130px; outline: none; }
-  .tsel { background: var(--bg-soft); border: 1px solid var(--border); color: var(--text); border-radius: 10px; padding: 6px 8px; font-size: 12.5px; outline: none; cursor: pointer; }
+  .tsearch { display: flex; align-items: center; gap: 6px; background: none; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; padding: 5px 2px; transition: border-color .15s; }
+  .tsearch:focus-within { border-bottom-color: var(--acc); }
+  .tsearch input { border: 0; background: none; color: var(--text); font-size: 13px; width: 130px; outline: none; padding: 0; margin-top: 0; }
+  .tsearch input:focus { box-shadow: none; }
+  .tsel { background: none; border: 0; border-bottom: 1px solid var(--border); color: var(--text); border-radius: 0; padding: 6px 2px; font-size: 12.5px; outline: none; cursor: pointer; transition: border-color .15s; }
+  .tsel:hover, .tsel:focus { border-bottom-color: var(--acc); }
   .tspace { flex: 1; }
   .selinfo { font-size: 12px; color: var(--muted); }
 
