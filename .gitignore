@@ -23,3 +23,10 @@ note
 
 # dynamic accounts (credentials)
 /config/accounts.extra.json
+
+# 桌面客户端壳 (desktop/)
+desktop/node_modules/
+desktop/release/
+desktop/payload/
+desktop/payload-runtime/
+desktop/runtime/

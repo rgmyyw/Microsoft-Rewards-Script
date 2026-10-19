@@ -175,6 +175,8 @@ const CRON_FILE = '/etc/cron.d/microsoft-rewards-cron'
 const CRON_TEMPLATE = '/etc/cron.d/microsoft-rewards-cron.template'
 
 export function applyCrontab({ enabled, cron }) {
+    // 桌面客户端等非容器环境自带调度循环，跳过 crontab 写入（macOS 上 crontab -r 会误删用户计划任务）
+    if (process.env.MRS_CRONTAB_DISABLE === 'true') return
     if (!enabled || !cron) {
         try {
             execFileSync('crontab', ['-r'], { stdio: 'ignore' })

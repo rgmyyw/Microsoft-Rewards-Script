@@ -1,0 +1,55 @@
+appId: com.msrewards.desktop
+productName: MS-Rewards-Desktop
+copyright: GPL-3.0-or-later
+
+directories:
+    output: release
+    buildResources: assets
+
+files:
+    - src/**/*
+    - wizard/**/*
+    - package.json
+
+# 主工程代码整体作为只读负载打包；首启由向导同步到 userData/app 并完成依赖安装/构建
+extraResources:
+    - from: payload
+      to: payload
+    - from: payload-runtime
+      to: runtime
+    - from: src/scheduler.js
+      to: scheduler.js
+    - from: assets/icon.png
+      to: assets/icon.png
+
+asar: true
+
+win:
+    target:
+        - target: nsis
+          arch: [x64]
+    icon: assets/icon.png
+    artifactName: ${productName}-${version}-${arch}-setup.${ext}
+
+nsis:
+    oneClick: false
+    perMachine: false
+    allowToChangeInstallationDirectory: true
+    createDesktopShortcut: true
+    shortcutName: MS Rewards 看板
+
+mac:
+    # 本地分发先跳过签名；对外分发请配置 CSC_LINK 证书
+    identity: null
+    target:
+        - target: dmg
+          arch: [arm64, x64]
+    category: public.app-category.utilities
+    icon: assets/icon.png
+    artifactName: ${productName}-${version}-${arch}.${ext}
+
+linux:
+    target: [AppImage]
+    category: Utility
+    icon: assets/icon.png
+    artifactName: ${productName}-${version}-${arch}.${ext}

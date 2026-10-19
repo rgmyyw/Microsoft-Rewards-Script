@@ -24,6 +24,7 @@
 - [✨ 核心特性](#-核心特性)
 - [🚀 快速开始](#-快速开始)
 - [📦 Windows 部署](#-windows-部署)
+- [🍎 桌面客户端（macOS / Windows）](#-桌面客户端macos--windows)
 - [🐳 Docker 部署](#-docker-部署)
 - [🖥️ 控制 API 与面板](#️-控制-api-与面板)
 - [⚙️ 配置参考](#️-配置参考)
@@ -82,14 +83,14 @@
 
 本脚本支持两种部署方式，**按你的场景二选一即可**：
 
-| 维度           | 📦 Windows 直跑                       | 🐳 Docker                                            |
-| -------------- | ------------------------------------- | ---------------------------------------------------- |
-| **配置方式**   | `.env`（账号）+ `config.json`（行为） | `.env`（账号）+ `compose.yaml` 的 `CONFIG_*`（行为） |
-| **调度**       | 手动 / 计划任务                       | 内置 cron + API 改调度                               |
-| **headless**   | 可选（可见窗口）                      | 强制 `true`（无显示器）                              |
-| **数据持久化** | `sessions/` 目录                      | `./config/` + `./sessions/` 挂载                     |
-| **升级方式**   | `git pull` + `npm run build`          | `docker compose up -d --build`                       |
-| **前置要求**   | Node.js 24+                           | Docker + Docker Compose                              |
+| 维度           | 📦 Windows 直跑                       | 🍎 桌面客户端                     | 🐳 Docker                                            |
+| -------------- | ------------------------------------- | --------------------------------- | ---------------------------------------------------- |
+| **配置方式**   | `.env`（账号）+ `config.json`（行为） | 同 Windows（在数据目录，向导引导） | `.env`（账号）+ `compose.yaml` 的 `CONFIG_*`（行为） |
+| **调度**       | 手动 / 计划任务                       | 内置调度器 + 看板改调度           | 内置 cron + API 改调度                               |
+| **headless**   | 可选（可见窗口）                      | 可选（可见窗口）                  | 强制 `true`（无显示器）                              |
+| **数据持久化** | `sessions/` 目录                      | 用户数据目录（自动管理）          | `./config/` + `./sessions/` 挂载                     |
+| **升级方式**   | `git pull` + `npm run build`          | 重装新版本安装包                  | `docker compose up -d --build`                       |
+| **前置要求**   | Node.js 24+                           | 无（向导自动装依赖与浏览器）      | Docker + Docker Compose                              |
 
 > ⚠️ 与 v3 不同：**账号统一在 `.env` 中配置**（`ACCOUNT_1_EMAIL` 等），不再使用 `accounts.json`；行为配置仍在 `config.json`（Docker 下用 `CONFIG_*` 环境变量）。
 
@@ -157,6 +158,29 @@
 > 💡 调试时可直接源码运行：`npm run dev`（带 `-dev` 参数输出 DEBUG 日志）。
 
 </details>
+
+---
+
+## 🍎 桌面客户端（macOS / Windows）
+
+`desktop/` 目录提供 Electron 壳，把整个项目包成桌面应用：**首次启动向导**（自动装依赖 → 构建 →
+下载 Chromium → 生成 `.env`/`config.json`）、**托盘常驻**、**崩溃自动重启**、**内置调度器**（等效
+容器 cron，可在看板上改调度），窗口内直接使用内嵌积分看板。主工程业务代码零改动。
+
+```bash
+# 开发运行（工作区 = 仓库根目录）
+cd desktop && npm install && npm start
+
+# 打包安装版（.exe / .dmg）
+npm run dist:win   # 或 npm run dist:mac
+```
+
+数据（账号 `.env`、会话 `sessions/`、看板数据、日志）都在用户数据目录：
+Windows `%APPDATA%/MS-Rewards-Desktop/app`，macOS `~/Library/Application Support/MS-Rewards-Desktop/app`，
+从托盘菜单「打开数据目录」直达。详见 [`desktop/README.md`](desktop/README.md)。
+
+> 注：看板的「🔑 人工登录」按钮依赖容器内 Xvfb/noVNC，桌面版不可用；桌面版人工登录请把数据目录
+> `config.json` 的 `headless` 临时设为 `false`，或使用 `npm run manual-login`。
 
 ---
 

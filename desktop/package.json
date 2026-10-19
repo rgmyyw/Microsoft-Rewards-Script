@@ -1,0 +1,22 @@
+{
+    "name": "ms-rewards-desktop",
+    "version": "1.0.0",
+    "private": true,
+    "description": "MS-Rewards-Script 桌面客户端壳（Electron）：环境向导 + 服务守护 + 内嵌看板",
+    "main": "src/main.js",
+    "author": "rgmyyw",
+    "license": "GPL-3.0-or-later",
+    "scripts": {
+        "gen:icons": "node scripts/gen-icons.cjs",
+        "prepare:payload": "node scripts/prepare-payload.cjs",
+        "start": "electron .",
+        "dev": "electron .",
+        "dist": "npm run prepare:payload && electron-builder --publish never",
+        "dist:win": "npm run prepare:payload && electron-builder --win --publish never",
+        "dist:mac": "npm run prepare:payload && electron-builder --mac --publish never"
+    },
+    "devDependencies": {
+        "electron": "^36.0.0",
+        "electron-builder": "^26.0.0"
+    }
+}

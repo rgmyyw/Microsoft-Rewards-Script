@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'" />
+<title>MS Rewards 桌面端 · 环境向导</title>
+<style>
+    :root {
+        --bg: #f6f7fb;
+        --card: #ffffff;
+        --text: #1f2937;
+        --muted: #6b7280;
+        --accent: #2563eb;
+        --accent-weak: #dbeafe;
+        --ok: #16a34a;
+        --warn: #d97706;
+        --err: #dc2626;
+        --border: #e5e7eb;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+        font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        display: flex;
+        justify-content: center;
+        padding: 28px 20px;
+    }
+    .card {
+        width: 100%;
+        max-width: 680px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 26px 28px;
+    }
+    h1 { font-size: 19px; margin-bottom: 4px; }
+    .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; word-break: break-all; }
+    .steps { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+    .step {
+        display: flex; align-items: center; gap: 10px;
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        font-size: 14px;
+        background: #fafafa;
+    }
+    .step .icon { width: 20px; text-align: center; flex: none; }
+    .step .label { flex: 1; }
+    .step .detail { color: var(--muted); font-size: 12px; text-align: right; word-break: break-all; }
+    .step.running { border-color: var(--accent); background: var(--accent-weak); }
+    .step.done .icon { color: var(--ok); }
+    .step.error { border-color: var(--err); background: #fef2f2; }
+    .step.skipped { opacity: 0.55; }
+    .log {
+        height: 170px; overflow-y: auto;
+        background: #0f172a; color: #cbd5e1;
+        font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        border-radius: 10px; padding: 10px 12px; white-space: pre-wrap; word-break: break-all;
+        margin-bottom: 16px;
+    }
+    .actions { display: flex; gap: 10px; align-items: center; }
+    button {
+        font: inherit; font-size: 14px; cursor: pointer;
+        padding: 9px 18px; border-radius: 9px; border: 1px solid var(--border);
+        background: #fff; color: var(--text);
+    }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.primary:disabled { opacity: 0.55; cursor: default; }
+    button:disabled:not(.primary) { opacity: 0.5; cursor: default; }
+    .status { margin-left: auto; font-size: 13px; color: var(--muted); }
+    .status.ok { color: var(--ok); }
+    .status.err { color: var(--err); }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 14px; line-height: 1.6; }
+    a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="card">
+    <h1>环境安装向导</h1>
+    <div class="sub" id="envLine">正在读取环境…</div>
+    <div class="steps" id="steps"></div>
+    <div class="log" id="log">等待操作…</div>
+    <div class="actions">
+        <button class="primary" id="startBtn">开始安装 / 检测</button>
+        <button id="openDirBtn">打开数据目录</button>
+        <button id="helpBtn">安装帮助</button>
+        <span class="status" id="status"></span>
+    </div>
+    <div class="hint" id="hint">
+        首次使用将自动完成：依赖安装 → 项目构建 → Chromium 内核下载（约 150MB，耗时视网络而定）→ 生成默认配置。<br />
+        完成后请在数据目录编辑 <b>.env</b>（账号）与 <b>config.json</b>（行为），然后重启应用。国内网络建议先配置 npm 镜像与 GitHub 代理。
+    </div>
+</div>
+
+<script src="wizard.js"></script>
+</body>
+</html>
