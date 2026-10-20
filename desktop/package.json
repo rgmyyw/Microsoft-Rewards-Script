@@ -1,5 +1,6 @@
 {
     "name": "ms-rewards-desktop",
+    "productName": "MS-Rewards-Desktop",
     "version": "1.0.0",
     "private": true,
     "description": "MS-Rewards-Script 桌面客户端壳（Electron）：环境向导 + 服务守护 + 内嵌看板",

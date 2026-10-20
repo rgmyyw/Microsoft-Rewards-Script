@@ -9,6 +9,7 @@ directories:
 files:
     - src/**/*
     - wizard/**/*
+    - assets/**/*
     - package.json
 
 # 主工程代码整体作为只读负载打包；首启由向导同步到 userData/app 并完成依赖安装/构建
@@ -28,7 +29,7 @@ win:
     target:
         - target: nsis
           arch: [x64]
-    icon: assets/icon.png
+    icon: icon.png
     artifactName: ${productName}-${version}-${arch}-setup.${ext}
 
 nsis:
@@ -45,11 +46,11 @@ mac:
         - target: dmg
           arch: [arm64, x64]
     category: public.app-category.utilities
-    icon: assets/icon.png
+    icon: icon.png
     artifactName: ${productName}-${version}-${arch}.${ext}
 
 linux:
     target: [AppImage]
     category: Utility
-    icon: assets/icon.png
+    icon: icon.png
     artifactName: ${productName}-${version}-${arch}.${ext}
