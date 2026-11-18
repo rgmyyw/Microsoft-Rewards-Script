@@ -2524,7 +2524,15 @@ const server = http.createServer(async (req, res) => {
                           doneCount: state.currentRun
                               ? state.currentRun.accounts.length
                               : liveAccounts.filter(x => x.done).length,
-                          totalCount: points.accountsTotal || liveAccounts.length
+                          totalCount: points.accountsTotal || liveAccounts.length,
+                          // 账号队列: 已见账号的实时状态(完成/失败含得分), 未见的即为排队
+                          queue: (points.accounts || []).map(a => ({
+                              email: a.email,
+                              done: !!a.done,
+                              success: a.success !== false,
+                              gained: a.collected != null ? a.collected : null,
+                              error: a.error || null
+                          }))
                       }
                     : null,
                 accounts: all,
@@ -3259,12 +3267,14 @@ const HTML = `<!DOCTYPE html>
   </section>
 
   <section class="runstrip idle" id="runStrip">
-    <div class="rs-top">
+    <div class="rs-top" id="rsTop" style="cursor:pointer" title="点击展开/收起账号队列" onclick="toggleRunQueue()">
       <span class="rs-title" id="rsTitle">空闲</span>
       <span class="rs-cur" id="rsCur"></span>
       <span class="rs-meta" id="rsMeta"></span>
+      <span id="rsToggle" style="margin-left:8px;opacity:.65">▸</span>
     </div>
     <div class="pbar" id="rsBar" style="display:none"><div class="fill" id="rsFill" style="width:0%"></div></div>
+    <div id="runQueue" style="display:none;margin-top:8px;font-size:12.5px;line-height:1.9"></div>
   </section>
 
   <section class="toolbar">
@@ -3774,6 +3784,43 @@ function renderRunStrip(run, d, now) {
     document.title = 'MS-Rewards 积分看板';
   }
   $('rsMeta').textContent = bits.join(' · ');
+  renderRunQueue(run);
+}
+
+// ---- 运行条队列展开(跑完/正在跑/排队) ----
+var runQueueOpen = false;
+function toggleRunQueue() {
+  runQueueOpen = !runQueueOpen;
+  $('rsToggle').textContent = runQueueOpen ? '▾' : '▸';
+  $('runQueue').style.display = runQueueOpen ? '' : 'none';
+  renderRunQueue(runCache);
+}
+function renderRunQueue(run) {
+  var el = $('runQueue');
+  if (!runQueueOpen) { el.innerHTML = ''; return; }
+  if (!run || run.running !== true) { el.innerHTML = '<span style="color:#888">当前没有运行中的批次</span>'; return; }
+  var rows = [];
+  var seen = {};
+  var q = run.queue || [];
+  for (var i = 0; i < q.length; i++) {
+    var a = q[i];
+    seen[a.email] = true;
+    if (!a.done && run.currentAccount === a.email) {
+      rows.push('<span style="color:#0a7d4e;font-weight:600">▶ ' + esc(a.email) + '（正在跑）</span>');
+    } else if (a.done && a.success) {
+      rows.push('<span style="color:#888">✓ ' + esc(a.email) + (a.gained != null ? ' · +' + fmtNum(a.gained) + ' 分' : '') + '</span>');
+    } else if (a.done) {
+      rows.push('<span style="color:#c0392b">✗ ' + esc(a.email) + (a.error ? ' · ' + esc(String(a.error).slice(0, 80)) : '') + '</span>');
+    } else {
+      rows.push('<span style="color:#888">⏳ ' + esc(a.email) + '（等待中）</span>');
+    }
+  }
+  // 控制台尚未上报的账号 = 排队(以账号全集补齐)
+  for (var j = 0; j < accountsCache.length; j++) {
+    var em = accountsCache[j].email;
+    if (!seen[em]) rows.push('<span style="color:#9aa">… ' + esc(em) + '（排队）</span>');
+  }
+  el.innerHTML = rows.join('<br>');
 }
 
 // ---- 下次定时运行倒计时(每日 cron) ----

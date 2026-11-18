@@ -63,7 +63,7 @@ export function logAccountResult(context: SummaryContext, stats: AccountStats): 
     context.logger.event(
         'main',
         status === 'skipped' ? 'ACCOUNT-SKIP' : 'ACCOUNT-END',
-        `账户完成: ${stats.email} | pointsGained=${pointsKnown ? stats.collectedPoints : 'unknown'}` +
+        `Completed account: ${stats.email} | pointsGained=${pointsKnown ? stats.collectedPoints : 'unknown'}` +
             ` | previousBalance=${stats.initialPoints} | currentBalance=${stats.finalPoints}` +
             ` | durationSeconds=${stats.duration} | status=${status}` +
             (reason ? ` | reason=${JSON.stringify(reason)}` : '') +

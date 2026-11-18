@@ -40,7 +40,7 @@ export class BrowserSearch extends BaseActivity {
 
     async search(page: Page, isMobile: boolean): Promise<number | null> {
         const startBalance = Number(this.bot.userData.currentPoints ?? 0)
-        this.bot.logger.info(isMobile, 'SEARCH-BING', `开始 Bing 搜索 | 当前余额=${startBalance}`)
+        this.bot.logger.info(isMobile, 'SEARCH-BING', `Starting Bing searches | currentBalance=${startBalance}`)
 
         const tracker = new PointsTracker(this.bot, isMobile)
         try {

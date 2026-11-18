@@ -267,7 +267,7 @@ export class RunCoordinator {
             this.bot.logger.info(
                 'main',
                 'ACCOUNT-START',
-                `开始处理账户: ${accountEmail} | geoLocale: ${account.geoLocale} | locale: ${this.bot.accountLocale.locale}${
+                `Starting account: ${accountEmail} | geoLocale: ${account.geoLocale} | locale: ${this.bot.accountLocale.locale}${
                     cachedRegion ? ` | cachedRegion: ${cachedRegion}` : ''
                 }`
             )
