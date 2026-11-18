@@ -66,6 +66,31 @@ function getLogFilePath(now: Date): string | null {
 }
 
 /**
+ * 日志保留天数：按天滚动的本地日志文件，超期自动清理
+ */
+const LOG_RETENTION_DAYS = 90
+let retentionChecked = false
+
+function cleanExpiredLogFiles(): void {
+    if (retentionChecked || !logFileDir) return
+    retentionChecked = true
+    try {
+        const cutoff = Date.now() - LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000
+        for (const name of fs.readdirSync(logFileDir)) {
+            if (!/^\d{4}-\d{2}-\d{2}\.log$/.test(name)) continue
+            const filePath = path.join(logFileDir, name)
+            try {
+                if (fs.statSync(filePath).mtimeMs < cutoff) fs.unlinkSync(filePath)
+            } catch {
+                // 单个文件清理失败不影响其余文件
+            }
+        }
+    } catch (error) {
+        console.error('[Logger] 清理过期日志失败:', error)
+    }
+}
+
+/**
  * 本地时区的 YYYY-MM-DD HH:mm:ss(.sss) 时间戳，用于日志与推送展示
  */
 export function formatLocalTimestamp(date: Date, withMilliseconds = false): string {
@@ -92,6 +117,7 @@ function writeLogToFile(logContent: string): void {
     try {
         const logFilePath = getLogFilePath(new Date())
         if (!logFilePath) return
+        cleanExpiredLogFiles()
         fs.appendFileSync(logFilePath, formatLocalTimestamp(new Date(), true) + ' ' + logContent + '\n', 'utf8')
     } catch (error) {
         console.error('[Logger] 写入日志文件失败:', error)
