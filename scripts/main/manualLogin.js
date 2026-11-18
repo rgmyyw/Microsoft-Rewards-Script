@@ -172,6 +172,47 @@ function loadStoredSession(dbPath, email, platform, fresh) {
     }
 }
 
+/**
+ * 纯自动填充模式: 页面出现账号输入框就填账号, 出现密码输入框就填密码;
+ * 不点击任何按钮、不提交——登录方式选择与提交全部由人工在窗口内完成。
+ * 后台并行观察至多 3 分钟, 不阻塞主流程; 输入框已有内容时不覆盖。
+ */
+function startAutoFill(page, account) {
+    let emailFilled = false
+    let passFilled = false
+    const deadline = Date.now() + 180000
+    ;(async () => {
+        while (Date.now() < deadline) {
+            try {
+                if (!emailFilled) {
+                    const box = page.locator('input[type="email"]').first()
+                    if (await box.isVisible().catch(() => false)) {
+                        if (!(await box.inputValue().catch(() => ''))) {
+                            await box.fill(account.email)
+                            log('INFO', `已自动填充账号邮箱: ${account.email} (提交请人工操作)`)
+                        }
+                        emailFilled = true
+                    }
+                }
+                if (!passFilled) {
+                    const box = page.locator('input[type="password"]').first()
+                    if (await box.isVisible().catch(() => false)) {
+                        if (!(await box.inputValue().catch(() => '')) && account.password) {
+                            await box.fill(account.password)
+                            log('INFO', '已自动填充密码 (提交请人工操作)')
+                        }
+                        passFilled = true
+                    }
+                }
+                if (emailFilled && passFilled) return
+            } catch {
+                return // 页面跳转/上下文销毁等, 静默停止观察
+            }
+            await new Promise(r => setTimeout(r, 1000))
+        }
+    })()
+}
+
 async function waitForStableRewardsPage(page, browser) {
     let stableSince = null
     let lastReportedSecond = -1
@@ -446,6 +487,8 @@ async function runPlatform({ account, config, dbPath, platform, fresh }) {
         await page.goto(REWARDS_LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: globalTimeout }).catch(error => {
             log('WARN', `Initial Rewards navigation did not finish cleanly: ${error.message}`)
         })
+
+        await startAutoFill(page, account)
 
         log('INFO', 'Complete the Microsoft sign-in manually in the browser window')
         await waitForStableRewardsPage(page, browser)
