@@ -26,7 +26,7 @@ export class ApiSearchOnBing extends BaseActivity {
         this.bot.logger.info(
             this.bot.isMobile,
             'SEARCH-ON-BING',
-            `Starting SearchOnBing | offerId=${offerId} | title="${promotion.title}" | currentBalance=${this.oldBalance}`
+            `开始 SearchOnBing | offerId=${offerId} | 标题="${promotion.title}" | 当前余额=${this.oldBalance}`
         )
 
         const verifier = new OfferVerifier(this.bot, offerId)
@@ -39,11 +39,7 @@ export class ApiSearchOnBing extends BaseActivity {
             if (!queries.length)
                 return await verifier.verify(activityResult('unconfirmed', 'search-query-unavailable', offerId))
             if (!(await activateSearchOnBing(this.bot, promotion))) {
-                this.bot.logger.warn(
-                    this.bot.isMobile,
-                    'SEARCH-ON-BING',
-                    `Search activity couldn't be activated, aborting | offerId=${offerId}`
-                )
+                this.bot.logger.warn(this.bot.isMobile, 'SEARCH-ON-BING', `搜索活动无法激活，中止 | offerId=${offerId}`)
                 return await verifier.verify(activityResult('unconfirmed', 'activation-not-confirmed', offerId))
             }
 
@@ -70,7 +66,7 @@ export class ApiSearchOnBing extends BaseActivity {
             this.bot.logger.error(
                 this.bot.isMobile,
                 'SEARCH-ON-BING',
-                `Error in doSearchOnBing | offerId=${offerId} | message=${error instanceof Error ? error.message : String(error)}`
+                `doSearchOnBing 出错 | offerId=${offerId} | 错误=${error instanceof Error ? error.message : String(error)}`
             )
             return await verifier.verify(activityFailure(error, offerId))
         }
@@ -81,7 +77,7 @@ export class ApiSearchOnBing extends BaseActivity {
 
         const cgDashboard = (await this.bot.rewards.getDashboardData()).dashboard
         const cg = this.buildCategoryGroup(cgDashboard, offerId)
-        this.bot.logger.debug(this.bot.isMobile, 'SEARCH-ON-BING-SEARCH', `Category group | cg=${cg || '(none)'}`)
+        this.bot.logger.debug(this.bot.isMobile, 'SEARCH-ON-BING-SEARCH', `分类组 | cg=${cg || '(none)'}`)
 
         return runSearchOnBingQueries(this.bot, promotion, queries, this.oldBalance, {
             search: async query => {
@@ -90,7 +86,7 @@ export class ApiSearchOnBing extends BaseActivity {
                     this.bot.logger.warn(
                         this.bot.isMobile,
                         'SEARCH-ON-BING-SEARCH',
-                        `No IG returned for query="${query}" - skipping this query`
+                        `查询 "${query}" 未返回 IG - 跳过该查询`
                     )
                     return null
                 }

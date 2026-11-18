@@ -162,7 +162,7 @@ export class BrowserSessions {
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'CLOSE-BROWSER',
-                    `Saving session | cookies=${storageState.cookies.length} | origins=${storageState.origins.length}`
+                    `正在保存会话 | Cookie数=${storageState.cookies.length} | origins=${storageState.origins.length}`
                 )
                 saveStorageState(this.bot.config.sessionPath, email, isMobile, storageState)
             }
@@ -171,24 +171,20 @@ export class BrowserSessions {
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'CLOSE-BROWSER',
-                    `Session not saved (browser already closing): ${error instanceof Error ? error.message : String(error)}`
+                    `会话未保存（浏览器已在关闭中）: ${error instanceof Error ? error.message : String(error)}`
                 )
             } else {
-                this.bot.logger.error(this.bot.isMobile, 'CLOSE-BROWSER', `Failed to save session: ${error}`)
+                this.bot.logger.error(this.bot.isMobile, 'CLOSE-BROWSER', `保存会话失败: ${error}`)
             }
         } finally {
             try {
                 await browser.close()
-                this.bot.logger.debug(this.bot.isMobile, 'CLOSE-BROWSER', 'Browser context closed')
+                this.bot.logger.debug(this.bot.isMobile, 'CLOSE-BROWSER', '浏览器上下文已关闭')
             } catch (error) {
                 if (isBrowserClosedError(error)) {
-                    this.bot.logger.debug(this.bot.isMobile, 'CLOSE-BROWSER', 'Browser was already closed.')
+                    this.bot.logger.debug(this.bot.isMobile, 'CLOSE-BROWSER', '浏览器已处于关闭状态。')
                 } else {
-                    this.bot.logger.warn(
-                        this.bot.isMobile,
-                        'CLOSE-BROWSER',
-                        'Shutdown encountered an error, but process exiting.'
-                    )
+                    this.bot.logger.warn(this.bot.isMobile, 'CLOSE-BROWSER', '关闭时遇到错误，但进程仍在退出。')
                 }
             }
         }

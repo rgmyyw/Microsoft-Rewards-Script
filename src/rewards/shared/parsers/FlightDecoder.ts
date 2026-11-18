@@ -25,7 +25,7 @@ export class FlightDecoder {
                         this.bot.logger.debug(
                             this.bot.isMobile,
                             'REACT-PARSE',
-                            `Skipped undecodable flight chunk | error=${err instanceof Error ? err.message : String(err)}`
+                            `跳过无法解码的 flight 代码块 | 错误=${err instanceof Error ? err.message : String(err)}`
                         )
                     }
                 }
@@ -41,14 +41,14 @@ export class FlightDecoder {
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'REACT-PARSE',
-                `Concatenated flight chunks | pages=${pages.length} | chunks=${count} | length=${combined.length} | perSource=[${perPage.join(', ')}]`
+                `已拼接 flight 代码块 | 页面数=${pages.length} | 代码块=${count} | 长度=${combined.length} | 每来源=[${perPage.join(', ')}]`
             )
 
             if (count === 0) {
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'REACT-PARSE',
-                    'No __next_f flight chunks found - page may not be an RSC render or markup changed'
+                    '未找到 __next_f flight 代码块 - 页面可能不是 RSC 渲染或标记已变化'
                 )
             }
 
@@ -57,7 +57,7 @@ export class FlightDecoder {
             this.bot.logger.error(
                 this.bot.isMobile,
                 'REACT-PARSE',
-                `Failed concatenating flight chunks | error=${error instanceof Error ? error.message : String(error)}`
+                `拼接 flight 代码块失败 | 错误=${error instanceof Error ? error.message : String(error)}`
             )
             return ''
         }
@@ -135,7 +135,7 @@ export class FlightDecoder {
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'REACT-PARSE',
-                `extractObjects("${anchor}") had ${failures} unparseable matches`
+                `extractObjects("${anchor}") 有 ${failures} 个无法解析的匹配`
             )
         }
 

@@ -10,6 +10,7 @@ export interface Config {
     skipNonPointTasks: boolean
     accountDelay: ConfigDelay
     taskDelay: ConfigDelay
+    failedAccountRetry: ConfigFailedAccountRetry
     workers: ConfigWorkers
     activities: ConfigActivities
     searchOnBingLocalQueries: boolean
@@ -24,7 +25,7 @@ export interface Config {
 
 export type RewardsMode = 'api' | 'browser'
 
-export type QueryEngine = 'google' | 'wikipedia' | 'wikirandom' | 'hackernews' | 'reddit' | 'local'
+export type QueryEngine = 'china' | 'google' | 'wikipedia' | 'wikirandom' | 'hackernews' | 'reddit' | 'local'
 
 export type RssFeedSelector = 'rss' | `rss.${string}`
 export type QueryEngineEntry = QueryEngine | RssFeedSelector
@@ -39,6 +40,7 @@ export interface ConfigSearchSettings {
     clusterSearch: boolean
     useAccountLocale: boolean
     queryEngines: QueryEngineEntry[]
+    chinaApi: { appkey: string }
     searchResultVisitTime: number | string
     searchDelay: ConfigDelay
     readDelay: ConfigDelay
@@ -47,6 +49,12 @@ export interface ConfigSearchSettings {
 export interface ConfigDelay {
     min: number | string
     max: number | string
+}
+
+export interface ConfigFailedAccountRetry {
+    enabled: boolean
+    maxPasses: number
+    cooldown: ConfigDelay
 }
 
 export interface ConfigExperimental {
@@ -84,6 +92,8 @@ export interface ConfigWebhook {
     discord?: WebhookDiscordConfig
     ntfy?: WebhookNtfyConfig
     telegram?: WebhookTelegramConfig
+    pushplus?: WebhookPushPlusConfig
+    clawbot?: WebhookClawBotConfig
     webhookLogFilter: LogFilter
 }
 
@@ -114,4 +124,17 @@ export interface WebhookTelegramConfig {
     enabled?: boolean
     botToken: string
     chatId: string | number
+}
+
+export interface WebhookPushPlusConfig {
+    enabled?: boolean
+    token: string
+    title?: string
+    template?: 'txt' | 'html' | 'markdown'
+    channel?: string
+}
+
+export interface WebhookClawBotConfig {
+    enabled?: boolean
+    authFile?: string
 }

@@ -449,7 +449,13 @@ export class ProcessManager extends EventEmitter {
                         code: 'BAD_REQUEST'
                     })
                 }
-                if (BLOCKED_ENV.has(key.toUpperCase()) || (!CONFIG_ENV_KEYS.has(key) && !ACCOUNT_ENV_RE.test(key))) {
+                // ACCOUNTS_DYNAMIC_DISABLED 是动态账号选择流程自己生成的标记（见 accounts.js），
+                // 不是用户 env 覆盖，放行以避免定向运行被守卫拒绝。
+                const isDynamicFlag = key === 'ACCOUNTS_DYNAMIC_DISABLED'
+                if (
+                    !isDynamicFlag &&
+                    (BLOCKED_ENV.has(key.toUpperCase()) || (!CONFIG_ENV_KEYS.has(key) && !ACCOUNT_ENV_RE.test(key)))
+                ) {
                     throw Object.assign(new Error('Environment override is not allowed: ' + key), {
                         code: 'BAD_REQUEST'
                     })

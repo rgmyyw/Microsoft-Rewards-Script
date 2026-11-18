@@ -41,7 +41,14 @@ async function diag() {
         })
         console.log('HTTP', r.status, '| body:', String(r.data).slice(0, 300))
     } catch (e) {
-        console.log('SEND FAIL:', e?.message, '| status:', e?.status, '| body:', String(e?.response?.data ?? '').slice(0, 300))
+        console.log(
+            'SEND FAIL:',
+            e?.message,
+            '| status:',
+            e?.status,
+            '| body:',
+            String(e?.response?.data ?? '').slice(0, 300)
+        )
     }
 }
 

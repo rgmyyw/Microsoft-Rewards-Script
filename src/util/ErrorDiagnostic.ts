@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import type { Page } from 'patchright'
 import { getCurrentContext } from '../core/ExecutionContext'
 import { logSystemMessage } from '../logging/LogEvent'
+import { formatLocalTimestamp } from '../logging/Logger'
 
 const pending = new Set<Promise<string | null>>()
 const lastCapture = new WeakMap<Page, number>()
@@ -34,8 +35,11 @@ async function capture(page: Page, error: Error, category: string, platform?: st
     const job = (async (): Promise<string | null> => {
         try {
             const capturedAt = new Date().toISOString()
-            const id = `error-${capturedAt.replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`
-            const dir = path.join(root, id)
+            const id = `error-${formatLocalTimestamp(new Date(), true).replace(/[:. ]/g, '-')}-${randomUUID().slice(0, 8)}`
+            // 加固: 目录名只保留白名单字符, 防御路径拼接异常
+            const safeId = id.replace(/[^a-zA-Z0-9._-]/g, '_')
+            const dir = path.join(root, safeId)
+            if (!dir.startsWith(root + path.sep)) throw new Error('diagnostic dir escaped root')
             const context = getCurrentContext()
             const url = new URL(page.url())
             url.search = ''

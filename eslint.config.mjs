@@ -42,5 +42,24 @@ export default defineConfig(
         }
     },
 
+    // V4-china 适配: 面板为 CJS 单文件(内嵌浏览器端脚本), 诊断工具为 ESM 脚本,
+    // 保留 V4 代码风格(catch(e) 未使用等)
+    {
+        files: ['dashboard/**', 'scripts/main/**/*.js', 'scripts/tests/**', 'scripts/dev/**'],
+        rules: {
+            '@typescript-eslint/no-require-imports': 'off',
+            '@typescript-eslint/no-unused-vars': 'off',
+            'no-unused-vars': ['error', { caughtErrors: 'none', argsIgnorePattern: '^_', varsIgnorePattern: '^_' }]
+        }
+    },
+
+    // 面板内嵌浏览器端脚本与 marketProbe/manualLogin 的 page.evaluate 回调使用 DOM 全局
+    {
+        files: ['dashboard/**', 'scripts/main/marketProbe.js', 'scripts/main/manualLogin.js'],
+        languageOptions: {
+            globals: { ...globals.browser }
+        }
+    },
+
     prettier
 )

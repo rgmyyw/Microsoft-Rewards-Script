@@ -23,8 +23,8 @@ import {
     openSessionDb,
     parseArgs,
     resolveEmailArgument
-} from '../utils.js'
-import { getDirname } from '../utils.js'
+} from '../lib/commandUtils.js'
+import { getDirname } from '../lib/commandUtils.js'
 
 const USER_INFO_URL = 'https://rewards.bing.com/api/getuserinfo'
 const REWARDS_ORIGIN = 'https://rewards.bing.com'
@@ -55,15 +55,19 @@ function loadStoredSession(dbPath, email, platform) {
 function buildCookieHeader(storageState) {
     // 与脚本 BrowserFunc.buildCookieHeader 语义一致: 不合并重名, 全部拼接;
     // 发送顺序按路径长度降序(更具体的路径在前), 同路径时精确域优先
-    const cookies = (storageState && Array.isArray(storageState.cookies)) ? storageState.cookies : []
-    const matched = cookies.filter(c => String(c.domain || '').toLowerCase().endsWith('bing.com'))
+    const cookies = storageState && Array.isArray(storageState.cookies) ? storageState.cookies : []
+    const matched = cookies.filter(c =>
+        String(c.domain || '')
+            .toLowerCase()
+            .endsWith('bing.com')
+    )
     matched.sort((a, b) => {
         const pl = (b.path || '/').length - (a.path || '/').length
         if (pl !== 0) return pl
         const ad = String(a.domain || '').toLowerCase()
         const bd = String(b.domain || '').toLowerCase()
         if (ad === bd) return 0
-        return ad === 'rewards.bing.com' ? -1 : (bd === 'rewards.bing.com' ? 1 : 0)
+        return ad === 'rewards.bing.com' ? -1 : bd === 'rewards.bing.com' ? 1 : 0
     })
     if (!matched.length) return ''
     return matched.map(c => `${c.name}=${c.value}`).join('; ')
@@ -86,7 +90,13 @@ async function fetchUserInfo(cookieHeader, headers) {
         })
         clearTimeout(timer)
         const text = await res.text()
-        if (res.status !== 200) return { ok: false, status: res.status, location: res.headers.get('location') || '', body: text.slice(0, 120) }
+        if (res.status !== 200)
+            return {
+                ok: false,
+                status: res.status,
+                location: res.headers.get('location') || '',
+                body: text.slice(0, 120)
+            }
         try {
             return { ok: true, json: JSON.parse(text) }
         } catch (e) {
@@ -120,7 +130,12 @@ async function fetchFlyout(cookieHeader, headers) {
             return null
         }
         let json
-        try { json = JSON.parse(text) } catch (e) { log('WARN', 'flyout 非 JSON'); return null }
+        try {
+            json = JSON.parse(text)
+        } catch (e) {
+            log('WARN', 'flyout 非 JSON')
+            return null
+        }
         const ui = json?.userInfo ?? null
         let balance = ui?.balance ?? json?.userStatus?.availablePoints ?? null
         // 实测(2026-09-19): 会话不被 rewards 主接口接受时, flyout 会以未登录视角
@@ -150,7 +165,10 @@ function extractTasks(json) {
     const dsObj = d.dailySetPromotions
     if (dsObj && typeof dsObj === 'object' && !Array.isArray(dsObj)) {
         for (const k of todayKeys) {
-            if (Array.isArray(dsObj[k]) && dsObj[k].length) { ds = dsObj[k]; break }
+            if (Array.isArray(dsObj[k]) && dsObj[k].length) {
+                ds = dsObj[k]
+                break
+            }
         }
     }
     const dsItems = Array.isArray(ds) ? ds : []
@@ -158,8 +176,9 @@ function extractTasks(json) {
     const searchItems = ['pcSearch', 'mobileSearch']
         .flatMap(k => (Array.isArray(counters?.[k]) ? counters[k] : []))
         .filter(x => x && (x.pointProgressMax ?? 0) > 0)
-    const cards = (Array.isArray(d.punchCards) ? d.punchCards : [])
-        .flatMap(p => (Array.isArray(p?.childTasks) ? p.childTasks : []))
+    const cards = (Array.isArray(d.punchCards) ? d.punchCards : []).flatMap(p =>
+        Array.isArray(p?.childTasks) ? p.childTasks : []
+    )
     const countDone = items => {
         const total = items.length
         const done = items.filter(x => x.complete === true).length
@@ -169,14 +188,18 @@ function extractTasks(json) {
     const search = countDone(searchItems)
     const punch = countDone(cards)
     const hasAny = dailyset.total + search.total + punch.total > 0
-    const allDone = hasAny &&
+    const allDone =
+        hasAny &&
         (dailyset.total === 0 || dailyset.done === dailyset.total) &&
         (search.total === 0 || search.done === search.total) &&
         (punch.total === 0 || punch.done === punch.total)
     return {
-        dailysetDone: dailyset.done, dailysetTotal: dailyset.total,
-        searchDone: search.done, searchTotal: search.total,
-        punchDone: punch.done, punchTotal: punch.total,
+        dailysetDone: dailyset.done,
+        dailysetTotal: dailyset.total,
+        searchDone: search.done,
+        searchTotal: search.total,
+        punchDone: punch.done,
+        punchTotal: punch.total,
         allDone
     }
 }
@@ -184,6 +207,10 @@ function extractTasks(json) {
 async function main() {
     const args = parseArgs(process.argv.slice(2), { boolean: ['help', 'h'] })
     const email = resolveEmailArgument(args)
+    // 入口校验: 防参数注入(-- 开头 flag / 非邮箱形态)
+    if (!/^[\w.+-]+@[\w-]+(\.[\w-]+)+$/.test(email) || email.startsWith('--')) {
+        throw new Error(`Invalid email argument: ${email}`)
+    }
 
     const accounts = loadAccountsFromEnv(projectRoot)
     const account = findAccountByEmail(accounts, email)
@@ -204,10 +231,21 @@ async function main() {
         delete fpHeaders['cookie']
         const r = await fetchUserInfo(cookieHeader, fpHeaders)
         if (!r.ok) {
-            log('WARN', `${platform}: getuserinfo 失败(尝试 flyout 备用接口) | ${JSON.stringify({ status: r.status, location: r.location || '', error: r.error, body: r.body })}`)
+            log(
+                'WARN',
+                `${platform}: getuserinfo 失败(尝试 flyout 备用接口) | ${JSON.stringify({ status: r.status, location: r.location || '', error: r.error, body: r.body })}`
+            )
             const fb = await fetchFlyout(cookieHeader, fpHeaders)
             if (fb) {
-                const payload = { email: account.email, balance: fb.balance, tasks: fb.tasks, loggedIn: true, platform, via: 'flyout', checkedAt: new Date().toISOString() }
+                const payload = {
+                    email: account.email,
+                    balance: fb.balance,
+                    tasks: fb.tasks,
+                    loggedIn: true,
+                    platform,
+                    via: 'flyout',
+                    checkedAt: new Date().toISOString()
+                }
                 console.log('TASKPROBE_RESULT ' + JSON.stringify(payload))
                 return
             }

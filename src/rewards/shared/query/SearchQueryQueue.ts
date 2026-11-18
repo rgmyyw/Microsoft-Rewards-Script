@@ -31,7 +31,7 @@ export class SearchQueryQueue {
         this.bot.logger.debug(
             this.bot.isMobile,
             'QUERY-QUEUE',
-            `Queue prepared | mainTopics=${this.topics.length} | clusterSearch=${this.bot.config.searchSettings.clusterSearch}` +
+            `队列已准备 | 主题数=${this.topics.length} | 聚类搜索=${this.bot.config.searchSettings.clusterSearch}` +
                 ` | localeMode=${locale.mode} | language=${locale.language} | country=${locale.country} | engines=${this.bot.config.searchSettings.queryEngines.join(',')}`
         )
         return this.topics.length
@@ -43,7 +43,7 @@ export class SearchQueryQueue {
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'QUERY-QUEUE',
-                    `Cluster exhausted | main="${this.activeMainTopic}" | emitted=${this.activeClusterIndex}/${this.activeClusterSize}`
+                    `聚类已用尽 | 主题="${this.activeMainTopic}" | 已发出=${this.activeClusterIndex}/${this.activeClusterSize}`
                 )
             }
 
@@ -52,7 +52,7 @@ export class SearchQueryQueue {
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'QUERY-QUEUE',
-                    `Queue exhausted | topicsSeen=${this.seenTopics.size} | queriesSeen=${this.seenQueries.size}`
+                    `队列已耗尽 | 已见主题=${this.seenTopics.size} | 已见查询=${this.seenQueries.size}`
                 )
                 return null
             }
@@ -118,7 +118,7 @@ export class SearchQueryQueue {
         this.bot.logger.debug(
             this.bot.isMobile,
             'QUERY-QUEUE',
-            `Topic pool refilled | received=${topics.length} | queued=${this.topics.length} | previouslySeen=${this.seenTopics.size}`
+            `主题池已补充 | 接收=${topics.length} | 入队=${this.topics.length} | 此前已见=${this.seenTopics.size}`
         )
         return this.topics.length
     }

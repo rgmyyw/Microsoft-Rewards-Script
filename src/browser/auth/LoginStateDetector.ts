@@ -99,7 +99,7 @@ export class LoginStateDetector {
                 visible[name] = Boolean(
                     element &&
                     style?.visibility !== 'hidden' &&
-                    style?.display !== 'none' &&
+                    style?.display !== '无' &&
                     element.getClientRects().length
                 )
                 if (name === 'footerAction') footerText = element?.innerText ?? ''

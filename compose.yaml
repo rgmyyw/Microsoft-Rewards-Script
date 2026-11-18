@@ -10,12 +10,14 @@ services:
             - ./config:/usr/src/microsoft-rewards-script/config
             - ./diagnostics:/usr/src/microsoft-rewards-script/diagnostics
             - ./sessions:/usr/src/microsoft-rewards-script/sessions
+            # Run logs land here (daily files, 90-day retention built into the logger)
+            - ./logs:/usr/src/microsoft-rewards-script/logs
         env_file:
             # Load account credentials from the .env file (ACCOUNT_1_EMAIL, optional ACCOUNT_1_PASSWORD, etc.)
             - path: .env
         environment:
             # ── Scheduler ──────────────────────────────────────
-            TZ: 'America/Toronto'
+            TZ: 'Asia/Shanghai' # Set your timezone for proper scheduling
             NODE_ENV: 'production'
             # CRON_SCHEDULE is the *initial* default. It will run as default unless changed by the API
             # API schedule changes are saved to ./config/schedule.json, delete
@@ -55,10 +57,24 @@ services:
             #CONFIG_PROXY_IGNORE_CERTIFICATE_ERRORS: 'false'
             #... add additional configuration overrides as needed
 
+            # ── Embedded dashboard（内嵌看板）──────────────────────────
+            # API 模式下由 entrypoint 自动拉起；web UI 在 :8300（局域网，无鉴权，勿暴露公网）。
+            # 数据（push-config/state）持久化在 ./config/dashboard/。
+            #DASHBOARD_ENABLED: 'true'
+            #DASHBOARD_PORT: '8300'
+
+            # ── 国内特性（V4-china）──────────────────────────────────
+            # 查询源：中国热搜(gmya.net) + 本地词兜底；国内推荐，无需代理
+            #CONFIG_SEARCH_QUERY_ENGINES: 'china,local'
+            # gmya.net appkey，填入解除免费档限流（留空走免费档，有频率限制）
+            #CONFIG_CHINA_API_APPKEY: ''
+
         # ── Control API port mapping ──────────────────────────────
-        # Uncomment when API_MODE=true
+        # Uncomment when API_MODE=true. 3010 should stay loopback-only (token-bearing API);
+        # 8300 is the embedded dashboard web UI (LAN, no auth).
         #ports:
         #    - '127.0.0.1:3010:3010'
+        #    - '8300:8300'
 
         healthcheck:
             test: ['CMD-SHELL', 'scripts/docker/healthcheck.sh']

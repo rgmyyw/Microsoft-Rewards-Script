@@ -31,7 +31,7 @@ export async function readPunchCardParents(page: Page): Promise<RenderedPunchCar
             if (
                 !element.getClientRects().length ||
                 style.visibility === 'hidden' ||
-                style.display === 'none' ||
+                style.display === '无' ||
                 element.closest('[aria-disabled="true"], [data-disabled], [inert]')
             )
                 continue
@@ -80,7 +80,7 @@ export async function readPunchCardPage(page: Page) {
                 .trim()
         const visible = (element: Element) => {
             const style = getComputedStyle(element)
-            return element.getClientRects().length > 0 && style.visibility !== 'hidden' && style.display !== 'none'
+            return element.getClientRects().length > 0 && style.visibility !== 'hidden' && style.display !== '无'
         }
         const progress = [...main.querySelectorAll('p, span')]
             .filter(visible)

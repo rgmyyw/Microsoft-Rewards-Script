@@ -48,7 +48,7 @@ class BrowserManager {
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'BROWSER-SECURITY',
-                    'TLS certificate verification is disabled by proxy.ignoreCertificateErrors'
+                    'TLS 证书验证已被 proxy.ignoreCertificateErrors 禁用'
                 )
             }
 
@@ -80,7 +80,7 @@ class BrowserManager {
                 this.rootBrowser = null
                 this.rootAccountEmail = ''
                 const errorMessage = error instanceof Error ? error.message : String(error)
-                this.bot.logger.error(this.bot.isMobile, 'BROWSER', `Browser launch failed: ${errorMessage}`)
+                this.bot.logger.error(this.bot.isMobile, 'BROWSER', `浏览器启动失败: ${errorMessage}`)
                 throw error
             }
         } else {
@@ -122,9 +122,7 @@ class BrowserManager {
                     this.bot.isMobile,
                     'SESSION',
                     `Restoring saved browser session | cookies=${restoredStorageState.cookies.length} | origins=${restoredStorageState.origins.length} | ageMinutes=${ageMinutes}` +
-                        (session.expiredCookiesRemoved
-                            ? ` | expiredCookiesRemoved=${session.expiredCookiesRemoved}`
-                            : '')
+                        (session.expiredCookiesRemoved ? ` | 已清除过期Cookie=${session.expiredCookiesRemoved}` : '')
                 )
             } else if (fresh) {
                 this.bot.logger.info(this.bot.isMobile, 'SESSION', 'Starting a fresh sign-in without saved cookies')
@@ -135,11 +133,7 @@ class BrowserManager {
                     `Discarding saved cookies because the paired fingerprint is unavailable or incompatible | shouldUseFingerprint=${shouldUseFingerprint} | savedFingerprintPresent=${!!session.fingerprint} | profileMatch=${profileMatches} | localeMatch=${!!savedFingerprint && fingerprintMatchesLocale(savedFingerprint, this.bot.accountLocale)}`
                 )
             } else {
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    'SESSION',
-                    'No saved browser session found; login may be required'
-                )
+                this.bot.logger.info(this.bot.isMobile, 'SESSION', '未找到已保存的浏览器会话；可能需要登录')
             }
 
             if (savedFingerprint && !reuseFingerprint) {
@@ -188,7 +182,7 @@ class BrowserManager {
                     this.bot.logger.warn(isMobile, 'BROWSER', `Browser tab crashed | url=${p.url()}`)
                 )
             })
-            context.on('close', () => this.bot.logger.debug(this.bot.isMobile, 'BROWSER', 'Browser context closed'))
+            context.on('close', () => this.bot.logger.debug(this.bot.isMobile, 'BROWSER', '浏览器上下文已关闭'))
 
             if (shouldUseFingerprint) {
                 if (session?.storageState && !profileMatches) {

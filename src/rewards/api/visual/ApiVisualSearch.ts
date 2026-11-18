@@ -46,17 +46,13 @@ export class ApiVisualSearch extends BaseActivity implements VisualSearchDriver 
             this.bot.logger.warn(
                 this.bot.isMobile,
                 'VISUAL-SEARCH',
-                `Activation offer present but missing a hash | offerId=${offer.offerId}`
+                `激活 offer 存在但缺少 hash | offerId=${offer.offerId}`
             )
             return activationOutcome('unconfirmed', 'activation-metadata-missing', offer.offerId)
         }
 
         if (!offer.reportable) {
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                'VISUAL-SEARCH',
-                `Activation offer is not actionable | offerId=${offer.offerId}`
-            )
+            this.bot.logger.warn(this.bot.isMobile, 'VISUAL-SEARCH', `激活 offer 不可操作 | offerId=${offer.offerId}`)
             return activationOutcome('unconfirmed', 'activation-metadata-missing', offer.offerId)
         }
 
@@ -65,7 +61,7 @@ export class ApiVisualSearch extends BaseActivity implements VisualSearchDriver 
             this.bot.logger.warn(
                 this.bot.isMobile,
                 'VISUAL-SEARCH',
-                'Skipping activation: "reportActivity" action id not discovered in bundle'
+                '跳过激活：bundle 中未发现 "reportActivity" action id'
             )
             return activationOutcome('unconfirmed', 'activation-metadata-missing', offer.offerId)
         }
@@ -76,7 +72,7 @@ export class ApiVisualSearch extends BaseActivity implements VisualSearchDriver 
             this.bot.logger.warn(
                 this.bot.isMobile,
                 'VISUAL-SEARCH',
-                `Skipping activation: no valid activity type found | offerId=${offer.offerId}`
+                `跳过激活：未找到有效的 activityType | offerId=${offer.offerId}`
             )
             return activationOutcome('unconfirmed', 'activation-metadata-missing', offer.offerId)
         }
@@ -84,7 +80,7 @@ export class ApiVisualSearch extends BaseActivity implements VisualSearchDriver 
         this.bot.logger.debug(
             this.bot.isMobile,
             'VISUAL-SEARCH',
-            `Activating visual search | offerId=${offer.offerId} | activationSource=${offer.activationSource} | activityType=${metadata.activityType} | activityTypeSource=${metadata.activityTypeSource} | promotional=${metadata.isPromotional} | geo=${this.bot.userData.geoLocale}`
+            `正在激活视觉搜索 | offerId=${offer.offerId} | activationSource=${offer.activationSource} | activityType=${metadata.activityType} | activityTypeSource=${metadata.activityTypeSource} | promotional=${metadata.isPromotional} | geo=${this.bot.userData.geoLocale}`
         )
 
         try {
@@ -114,7 +110,7 @@ export class ApiVisualSearch extends BaseActivity implements VisualSearchDriver 
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'VISUAL-SEARCH',
-                    `Activated visual search | offerId=${offer.offerId} | acknowledged=${acknowledged} | confirmed=${confirmed}`
+                    `视觉搜索已激活 | offerId=${offer.offerId} | acknowledged=${acknowledged} | confirmed=${confirmed}`
                 )
                 return activationOutcome(
                     'activated',
@@ -128,7 +124,7 @@ export class ApiVisualSearch extends BaseActivity implements VisualSearchDriver 
             this.bot.logger.warn(
                 this.bot.isMobile,
                 'VISUAL-SEARCH',
-                `Activation not acknowledged | offerId=${offer.offerId} | status=${status}`
+                `激活未被服务器确认 | offerId=${offer.offerId} | status=${status}`
             )
             return activationOutcome(
                 'unconfirmed',
@@ -141,7 +137,7 @@ export class ApiVisualSearch extends BaseActivity implements VisualSearchDriver 
             this.bot.logger.warn(
                 this.bot.isMobile,
                 'VISUAL-SEARCH',
-                `Activation error | offerId=${offer.offerId} | ${error instanceof Error ? error.message : String(error)}`
+                `激活出错 | offerId=${offer.offerId} | ${error instanceof Error ? error.message : String(error)}`
             )
             return activationException(error, offer.offerId, true)
         }

@@ -63,7 +63,7 @@ export class ServerActions {
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'BOOTSTRAP',
-                    'No offers parsed - page may not have rendered the RSC payload (check login/redirect)'
+                    '未解析到任何优惠活动 - 页面可能未渲染 RSC 载荷（请检查登录/重定向）'
                 )
             }
 
@@ -71,7 +71,7 @@ export class ServerActions {
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'BOOTSTRAP',
-                    'No action ids discovered - server-action calls will fail (bundle may have stripped names)'
+                    '未发现任何 action id - server-action 调用将失败（bundle 可能已剥离名称）'
                 )
             }
 
@@ -90,7 +90,7 @@ export class ServerActions {
             this.bot.logger.error(
                 this.bot.isMobile,
                 'BOOTSTRAP',
-                `Failed acquiring context | error=${error instanceof Error ? error.message : String(error)}`
+                `获取上下文失败 | 错误=${error instanceof Error ? error.message : String(error)}`
             )
             throw error
         }
@@ -130,7 +130,7 @@ export class ServerActions {
             this.bot.logger.warn(
                 this.bot.isMobile,
                 'BOOTSTRAP',
-                `Failed to fetch ${route} HTML | error=${error instanceof Error ? error.message : String(error)} - snapshot and action discovery may be incomplete`
+                `获取 ${route} HTML 失败 | 错误=${error instanceof Error ? error.message : String(error)} - 快照和 action 发现可能不完整`
             )
         }
 

@@ -40,7 +40,7 @@ export class BrowserSearch extends BaseActivity {
 
     async search(page: Page, isMobile: boolean): Promise<number | null> {
         const startBalance = Number(this.bot.userData.currentPoints ?? 0)
-        this.bot.logger.info(isMobile, 'SEARCH-BING', `Starting Bing searches | currentBalance=${startBalance}`)
+        this.bot.logger.info(isMobile, 'SEARCH-BING', `开始 Bing 搜索 | 当前余额=${startBalance}`)
 
         const tracker = new PointsTracker(this.bot, isMobile)
         try {
@@ -50,7 +50,7 @@ export class BrowserSearch extends BaseActivity {
                 this.bot.logger.warn(
                     isMobile,
                     tracker.context,
-                    `Hit the ${tracker.maxSearches}-search ceiling with points still missing | ${tracker.progress()}`
+                    `已达 ${tracker.maxSearches} 次搜索上限但积分仍有缺口 | ${tracker.progress()}`
                 )
             }
 
@@ -90,11 +90,11 @@ export class BrowserSearch extends BaseActivity {
 
         const done = tracker.done() && !tracker.offerLost
         const reason = done
-            ? 'offer complete'
+            ? '活动完成'
             : tracker.offerLost
-              ? 'offer no longer present'
+              ? '活动已不存在'
               : stats.performed >= tracker.maxSearches
-                ? 'reached maxBonusSearches'
+                ? '达到最大加成搜索次数'
                 : stats.stagnant >= tracker.stagnantLimit
                   ? `${tracker.stagnantLimit} idle searches`
                   : 'query pool exhausted'
@@ -149,7 +149,7 @@ export class BrowserSearch extends BaseActivity {
             const queryQueue = new SearchQueryQueue(this.bot)
             const topicCount = await queryQueue.prepare()
             if (!topicCount) {
-                this.bot.logger.warn(isMobile, tracker.context, 'No main search topics available, skipping')
+                this.bot.logger.warn(isMobile, tracker.context, '没有可用的主搜索主题，跳过')
                 return stats
             }
 
@@ -161,7 +161,7 @@ export class BrowserSearch extends BaseActivity {
                 this.bot.signal.throwIfAborted()
                 const selected = await queryQueue.next()
                 if (!selected) {
-                    this.bot.logger.warn(isMobile, tracker.context, 'Query queue exhausted, stopping')
+                    this.bot.logger.warn(isMobile, tracker.context, '查询队列已耗尽，停止')
                     break
                 }
                 const query = selected.text
@@ -220,7 +220,7 @@ export class BrowserSearch extends BaseActivity {
             this.bot.logger.error(
                 isMobile,
                 tracker.context,
-                `Search session error | ${error instanceof Error ? error.message : String(error)}`
+                `搜索会话出错 | ${error instanceof Error ? error.message : String(error)}`
             )
             throw error
         } finally {
@@ -417,24 +417,16 @@ class PointsTracker implements SearchTracker {
         this.bot.logger.info(
             this.isMobile,
             this.context,
-            `Search points remaining | edge=${this.missing.edgePoints} | desktop=${this.missing.desktopPoints} | mobile=${this.missing.mobilePoints}`
+            `剩余搜索积分 | Edge=${this.missing.edgePoints} | 桌面端=${this.missing.desktopPoints} | 移动端=${this.missing.mobilePoints}`
         )
 
         this.zeroPointRun = this.missing.totalPoints <= 0 && this.runOnZeroPoints
         if (this.missing.totalPoints <= 0) {
             if (!this.runOnZeroPoints) {
-                this.bot.logger.debug(
-                    this.isMobile,
-                    this.context,
-                    'No search points to earn, skipping (runOnZeroPoints is disabled)'
-                )
+                this.bot.logger.debug(this.isMobile, this.context, '无可赚搜索积分，跳过（runOnZeroPoints 已禁用）')
                 return false
             }
-            this.bot.logger.info(
-                this.isMobile,
-                this.context,
-                'No search points reported, but runOnZeroPoints is enabled, searching anyway'
-            )
+            this.bot.logger.info(this.isMobile, this.context, '未报告搜索积分，但 runOnZeroPoints 已启用，仍继续搜索')
         }
         return true
     }

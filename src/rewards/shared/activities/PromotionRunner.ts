@@ -49,7 +49,7 @@ export class PromotionRunner extends BaseActivity {
         this.bot.logger.debug(
             this.bot.isMobile,
             'ACTIVITY',
-            `Processing activity | title="${promotion.title}" | offerId=${offerId} | type=${type}`
+            `处理活动 | 标题="${promotion.title}" | offerId=${offerId} | 类型=${type}`
         )
 
         const isSearchOnBing = isSearchOnBingPromotion(promotion)
@@ -77,7 +77,7 @@ export class PromotionRunner extends BaseActivity {
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'ACTIVITY',
-                `Found activity type "SearchOnBing" | title="${promotion.title}" | offerId=${offerId}`
+                `发现活动类型 "SearchOnBing" | 标题="${promotion.title}" | offerId=${offerId}`
             )
             return this.bot.activities.searchOnBing(promotion, source)
         }
@@ -85,16 +85,12 @@ export class PromotionRunner extends BaseActivity {
         this.bot.logger.debug(
             this.bot.isMobile,
             'ACTIVITY',
-            `Found activity type "UrlReward" | title="${promotion.title}" | offerId=${offerId}`
+            `发现活动类型 "UrlReward" | 标题="${promotion.title}" | offerId=${offerId}`
         )
         return this.bot.activities.runUrlReward(promotion, source)
     }
 
     private logDisabled(activity: string, offerId: string): void {
-        this.bot.logger.debug(
-            this.bot.isMobile,
-            'ACTIVITY',
-            `Skipping "${activity}" (disabled in config) | offerId=${offerId}`
-        )
+        this.bot.logger.debug(this.bot.isMobile, 'ACTIVITY', `跳过 "${activity}"（配置中已禁用） | offerId=${offerId}`)
     }
 }

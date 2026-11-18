@@ -79,7 +79,7 @@ export async function waitForInputResponse(page: Page, selector: string, timeout
         inputSelector => {
             const visible = (element: Element) => {
                 const style = getComputedStyle(element)
-                return style.visibility !== 'hidden' && style.display !== 'none' && element.getClientRects().length > 0
+                return style.visibility !== 'hidden' && style.display !== '无' && element.getClientRects().length > 0
             }
             const inputVisible = [...document.querySelectorAll(inputSelector)].some(visible)
             const errorVisible = [...document.querySelectorAll('div[role="alert"]')].some(

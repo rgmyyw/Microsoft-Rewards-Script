@@ -27,7 +27,10 @@
         "manual-login": "node ./scripts/main/manualLogin.js",
         "open-session": "node ./scripts/main/browserSession.js",
         "check:api": "tsc -p tsconfig.control-api.json",
-        "check": "npm run build && npm run check:api && npm run lint && npm run format:check"
+        "check": "npm run build && npm run check:api && npm run lint && npm run format:check",
+        "test": "node --test scripts/tests/*.test.cjs scripts/tests/*.test.mjs",
+        "clawbot:login": "node -r ts-node/register/transpile-only ./scripts/main/clawbotLogin.cjs",
+        "test:clawbot-smoke": "node -r ts-node/register/transpile-only ./scripts/tests/smokeClawbot.cjs"
     },
     "keywords": [
         "Bing Rewards",
@@ -41,6 +44,7 @@
         "@eslint/js": "^10.0.1",
         "@types/ms": "^2.1.0",
         "@types/node": "^24.19.2",
+        "@types/qrcode-terminal": "^0.12.2",
         "@types/semver": "^7.8.0",
         "eslint": "^10.14.0",
         "eslint-config-prettier": "^10.1.8",
@@ -61,6 +65,7 @@
         "otpauth": "^9.5.2",
         "p-queue": "^9.3.5",
         "patchright": "^1.64.2",
+        "qrcode-terminal": "^0.12.0",
         "semver": "^7.8.5",
         "ts-node": "^10.9.2",
         "zod": "^4.6.7"

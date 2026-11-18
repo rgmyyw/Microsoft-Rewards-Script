@@ -17,7 +17,7 @@ export class AccountRunner {
 
     async run(account: Account): Promise<AccountRunResult> {
         const accountEmail = account.email
-        this.bot.logger.debug('main', 'FLOW', `Starting session for ${accountEmail}`)
+        this.bot.logger.debug('main', 'FLOW', `开始为 ${accountEmail} 创建会话`)
 
         this.bot.cancellation?.signal.throwIfAborted()
         this.bot.accountState.reset()

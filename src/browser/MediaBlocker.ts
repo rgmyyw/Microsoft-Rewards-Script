@@ -46,11 +46,7 @@ export async function configureMediaBlocking(bot: MediaContext, context: Browser
     if (existingState) {
         if (existingState.enabled) return
         existingState.enabled = true
-        bot.logger.debug(
-            bot.isMobile,
-            'BROWSER',
-            'Media loading disabled after authentication | blockedResourceTypes=image,media | httpCache=disabled-by-routing'
-        )
+        bot.logger.debug(bot.isMobile, 'BROWSER', '媒体加载已禁用 | 拦截资源类型=image,media | http缓存=已通过路由禁用')
         return
     }
 
@@ -75,9 +71,5 @@ export async function configureMediaBlocking(bot: MediaContext, context: Browser
     })
     mediaBlockingState.set(context, state)
 
-    bot.logger.debug(
-        bot.isMobile,
-        'BROWSER',
-        '媒体加载已禁用 | 拦截资源类型=image,media | http缓存=已通过路由禁用'
-    )
+    bot.logger.debug(bot.isMobile, 'BROWSER', '媒体加载已禁用 | 拦截资源类型=image,media | http缓存=已通过路由禁用')
 }

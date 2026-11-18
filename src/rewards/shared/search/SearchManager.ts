@@ -111,7 +111,7 @@ export class SearchManager {
                 this.bot.logger.error(
                     'main',
                     'SEARCH-MANAGER',
-                    `${platform} search failed | ${error instanceof Error ? error.message : String(error)}`
+                    `${platform} 搜索失败 | ${error instanceof Error ? error.message : String(error)}`
                 )
                 return null
             }
@@ -130,7 +130,7 @@ export class SearchManager {
                 this.bot.logger.error(
                     'main',
                     'SEARCH-MANAGER',
-                    `Bonus search failed | ${error instanceof Error ? error.message : String(error)}`
+                    `奖励搜索失败 | ${error instanceof Error ? error.message : String(error)}`
                 )
                 return null
             }

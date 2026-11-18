@@ -88,7 +88,7 @@ export class VisualSearchClient {
             this.bot.logger.warn(
                 this.bot.isMobile,
                 'VISUAL-SEARCH-BCID',
-                `Failed to acquire visual search | ${error instanceof Error ? error.message : String(error)}`
+                `获取视觉搜索失败 | ${error instanceof Error ? error.message : String(error)}`
             )
             return null
         }

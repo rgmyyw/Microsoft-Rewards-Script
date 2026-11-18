@@ -56,7 +56,7 @@ export class Login {
             this.capturedUnknownUrls.clear()
             this.signInMethodsLogged = false
             this.passwordlessMethodSelected = false
-            this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Starting login process')
+            this.bot.logger.info(this.bot.isMobile, 'LOGIN', '开始登录流程')
 
             await page
                 .goto(URLs.rewards.userLogin, {
@@ -80,15 +80,15 @@ export class Login {
                 if (page.isClosed()) throw new Error('Page closed unexpectedly')
 
                 iteration++
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', `State check iteration ${iteration}/${maxIterations}`)
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', `状态检查迭代 ${iteration}/${maxIterations}`)
 
                 const detected = await this.detectCurrentState(page)
                 if (page.url() !== detected.url) continue
                 const { state } = detected
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', `Current state: ${state}`)
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', `当前状态: ${state}`)
 
                 if (state !== previousState && previousState !== 'UNKNOWN') {
-                    this.bot.logger.debug(this.bot.isMobile, 'LOGIN', `State transition: ${previousState} → ${state}`)
+                    this.bot.logger.debug(this.bot.isMobile, 'LOGIN', `状态转换: ${previousState} → ${state}`)
                 }
 
                 if (
@@ -101,14 +101,10 @@ export class Login {
                     this.bot.logger.debug(
                         this.bot.isMobile,
                         'LOGIN',
-                        `Same state count: ${sameStateCount}/4 for state "${state}"`
+                        `相同状态计数: ${sameStateCount}/4 状态为 "${state}"`
                     )
                     if (sameStateCount >= 4) {
-                        this.bot.logger.warn(
-                            this.bot.isMobile,
-                            'LOGIN',
-                            `Stuck in state "${state}" for 4 loops, refreshing page`
-                        )
+                        this.bot.logger.warn(this.bot.isMobile, 'LOGIN', `在状态 "${state}" 停滞4次循环，刷新页面`)
                         await page.reload({ waitUntil: 'domcontentloaded' })
                         await this.bot.utils.wait(3000)
                         sameStateCount = 0
@@ -122,7 +118,7 @@ export class Login {
 
                 if (state === 'LOGGED_IN') {
                     loggedIn = true
-                    this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Successfully logged in')
+                    this.bot.logger.info(this.bot.isMobile, 'LOGIN', '登录成功')
                     break
                 }
 
@@ -145,7 +141,7 @@ export class Login {
             this.bot.logger.error(
                 this.bot.isMobile,
                 'LOGIN',
-                `Fatal error: ${error instanceof Error ? error.message : String(error)}`
+                `致命错误: ${error instanceof Error ? error.message : String(error)}`
             )
             throw error
         } finally {
@@ -280,7 +276,7 @@ export class Login {
         if (options.length === 0) return
 
         const labels = options.map(option => this.sanitizeSignInLabel(option.label))
-        this.bot.logger.debug(this.bot.isMobile, 'LOGIN', `Available sign-in methods: ${labels.join(' | ')}`)
+        this.bot.logger.debug(this.bot.isMobile, 'LOGIN', `可用的登录方式: ${labels.join(' | ')}`)
     }
 
     private async waitForIdle(page: Page, note: string, timeout = 5000): Promise<void> {
@@ -297,7 +293,7 @@ export class Login {
         if (!clicked) return false
 
         await this.waitForIdle(page, `after ${label}`)
-        this.bot.logger.debug(this.bot.isMobile, 'LOGIN', `${label} clicked`)
+        this.bot.logger.debug(this.bot.isMobile, 'LOGIN', `${label} 已点击`)
         return true
     }
 
@@ -314,7 +310,7 @@ export class Login {
             )
             return true
         }
-        this.bot.logger.debug(this.bot.isMobile, 'HANDLE-STATE', `Processing state: ${state}`)
+        this.bot.logger.debug(this.bot.isMobile, 'HANDLE-STATE', `处理状态: ${state}`)
 
         switch (state) {
             case 'ACCOUNT_LOCKED': {
@@ -326,7 +322,7 @@ export class Login {
             case 'ERROR_ALERT': {
                 const alertEl = page.locator(this.selectors.errorAlert)
                 const errorMsg = await alertEl.innerText().catch(() => 'Unknown Error')
-                this.bot.logger.error(this.bot.isMobile, 'LOGIN', `Account error: ${errorMsg}`)
+                this.bot.logger.error(this.bot.isMobile, 'LOGIN', `账户错误: ${errorMsg}`)
                 throw new Error(`Microsoft login error: ${errorMsg}`)
             }
 
@@ -334,22 +330,18 @@ export class Login {
                 return true
 
             case 'EMAIL_INPUT': {
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Entering email')
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '输入邮箱')
                 const result = await this.emailLogin.enterEmail(page, account.email)
                 if (result !== 'ok') return false
                 await this.waitForIdle(page, 'after email entry')
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Email entered successfully')
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '邮箱输入成功')
                 return true
             }
 
             // Enter password - use it only when Microsoft actually presents the password page
             case 'PASSWORD_INPUT': {
                 if (!account.password) {
-                    this.bot.logger.info(
-                        this.bot.isMobile,
-                        'LOGIN',
-                        'Password input detected but no password is configured; returning to sign-in methods'
-                    )
+                    this.bot.logger.info(this.bot.isMobile, 'LOGIN', '检测到密码输入页但未配置密码；返回登录方式选择')
                     if (await this.tryClick(page, this.selectors.backButton, 'Back button')) return true
 
                     this.bot.logger.warn(
@@ -360,20 +352,20 @@ export class Login {
                     return false
                 }
 
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Entering password')
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '输入密码')
                 const result = await this.emailLogin.enterPassword(page, account.password)
                 if (result === 'error') return false
                 await this.waitForIdle(page, 'after password entry')
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Password entered successfully')
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '密码输入成功')
                 return true
             }
 
             // Generic alternative-method footer - open the method picker before choosing a credential
             case 'FOOTER_ACTION': {
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Opening alternative sign-in methods')
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '打开备选登录方式')
                 const clicked = await this.bot.browser.utils.click(page, this.selectors.footerAction)
                 if (!clicked) {
-                    this.bot.logger.warn(this.bot.isMobile, 'LOGIN', 'Could not open alternative sign-in methods')
+                    this.bot.logger.warn(this.bot.isMobile, 'LOGIN', '无法打开备选登录方式')
                     return false
                 }
                 this.passwordlessMethodSelected = false
@@ -383,10 +375,10 @@ export class Login {
 
             // Get a sign-in request - keep the primary Authenticator action when footer is a proof fallback
             case 'PASSWORDLESS_SEND_CODE': {
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Continuing with primary sign-in method')
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '继续使用主要登录方式')
                 const clicked = await this.bot.browser.utils.click(page, this.selectors.primaryButton)
                 if (!clicked) {
-                    this.bot.logger.warn(this.bot.isMobile, 'LOGIN', 'Could not continue with primary sign-in method')
+                    this.bot.logger.warn(this.bot.isMobile, 'LOGIN', '无法继续使用主要登录方式')
                     return false
                 }
                 await this.waitForIdle(page, 'after primary sign-in action')
@@ -404,11 +396,11 @@ export class Login {
                 const emailOption = methods.find(method => method.type === 'EMAIL')?.option
 
                 if (account.password && passwordOption) {
-                    this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Password sign-in is available; selecting it')
+                    this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '密码登录可用；正在选择')
                     this.passwordlessMethodSelected = false
 
                     if (!(await this.clickSignInMethodOption(page, passwordOption))) {
-                        this.bot.logger.warn(this.bot.isMobile, 'LOGIN', 'Could not select password sign-in method')
+                        this.bot.logger.warn(this.bot.isMobile, 'LOGIN', '无法选择密码登录方式')
                         return false
                     }
 
@@ -418,7 +410,7 @@ export class Login {
 
                 const passwordlessOptionOldFound = await this.checkSelector(page, this.selectors.passwordlessOptionOld)
                 if (authenticatorOption || passwordlessOptionOldFound) {
-                    this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Selecting Microsoft Authenticator sign-in')
+                    this.bot.logger.info(this.bot.isMobile, 'LOGIN', '选择Microsoft Authenticator登录')
                     this.passwordlessMethodSelected = true
 
                     const clicked = authenticatorOption
@@ -427,7 +419,7 @@ export class Login {
 
                     if (!clicked) {
                         this.passwordlessMethodSelected = false
-                        this.bot.logger.warn(this.bot.isMobile, 'LOGIN', 'Could not select Microsoft Authenticator')
+                        this.bot.logger.warn(this.bot.isMobile, 'LOGIN', '无法选择Microsoft Authenticator')
                         return false
                     }
 
@@ -441,15 +433,11 @@ export class Login {
                         !passwordlessChallengeVisible &&
                         (await this.checkSelector(page, this.selectors.primaryButton))
                     ) {
-                        this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Sending Microsoft Authenticator request')
+                        this.bot.logger.info(this.bot.isMobile, 'LOGIN', '正在发送Microsoft Authenticator请求')
                         const confirmed = await this.bot.browser.utils.click(page, this.selectors.primaryButton)
                         if (!confirmed) {
                             this.passwordlessMethodSelected = false
-                            this.bot.logger.warn(
-                                this.bot.isMobile,
-                                'LOGIN',
-                                'Could not send Microsoft Authenticator request'
-                            )
+                            this.bot.logger.warn(this.bot.isMobile, 'LOGIN', '无法发送Microsoft Authenticator请求')
                             return false
                         }
                         await this.waitForIdle(page, 'after Microsoft Authenticator request')
@@ -464,12 +452,12 @@ export class Login {
                         this.bot.logger.error(
                             this.bot.isMobile,
                             'LOGIN',
-                            'No supported non-interactive sign-in method is available; email-code fallback requires interactive stdin'
+                            '没有可用的非交互登录方式；邮箱验证码回退需要交互式终端输入'
                         )
                         return false
                     }
 
-                    this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Selecting email-code sign-in')
+                    this.bot.logger.info(this.bot.isMobile, 'LOGIN', '选择邮箱验证码登录')
                     this.passwordlessMethodSelected = false
 
                     const clicked = emailOption
@@ -477,7 +465,7 @@ export class Login {
                         : await this.bot.browser.utils.click(page, this.selectors.emailIconOld)
 
                     if (!clicked) {
-                        this.bot.logger.warn(this.bot.isMobile, 'LOGIN', 'Could not select email-code sign-in method')
+                        this.bot.logger.warn(this.bot.isMobile, 'LOGIN', '无法选择邮箱验证码登录方式')
                         return false
                     }
 
@@ -493,18 +481,18 @@ export class Login {
                 this.bot.logger.error(
                     this.bot.isMobile,
                     'LOGIN',
-                    `No supported sign-in method available${ignoredMethods.length ? `; ignored=${ignoredMethods.join(',')}` : ''}`
+                    `没有可用的受支持登录方式${ignoredMethods.length ? `; ignored=${ignoredMethods.join(',')}` : ''}`
                 )
                 return false
             }
 
             // Recovery email confirmation
             case 'RECOVERY_EMAIL_INPUT': {
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Recovery email input detected')
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '检测到恢复邮箱输入')
                 await this.waitForIdle(page, 'on recovery page')
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Initiating recovery email handler')
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '启动恢复邮箱处理器')
                 await this.recoveryLogin.handle(page, account?.recoveryEmail)
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Recovery email handler completed successfully')
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '恢复邮箱处理器完成')
                 return true
             }
 
@@ -512,24 +500,16 @@ export class Login {
             case 'EMAIL_VERIFICATION_INPUT': {
                 if (!account.password) {
                     if (!canPromptForInput()) {
-                        this.bot.logger.error(
-                            this.bot.isMobile,
-                            'LOGIN',
-                            'Email verification requires a configured password or interactive stdin'
-                        )
+                        this.bot.logger.error(this.bot.isMobile, 'LOGIN', '邮箱验证需要已配置的密码或交互式终端输入')
                         return false
                     }
 
-                    this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Email verification input detected')
+                    this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '检测到邮箱验证输入')
                     await this.codeLogin.handle(page)
                     return true
                 }
 
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'LOGIN',
-                    'Email verification input detected; checking alternatives'
-                )
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '检测到邮箱验证输入；正在检查备选方式')
                 await this.waitForIdle(page, 'on email verification page')
 
                 const waitForState = async (accept: (state: LoginState) => boolean): Promise<LoginState | null> => {
@@ -565,13 +545,13 @@ export class Login {
 
                     if (nextState === 'PASSWORD_INPUT') {
                         this.passwordlessMethodSelected = false
-                        this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Password sign-in option selected')
+                        this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '已选择密码登录选项')
                         return true
                     }
 
                     if (nextState === 'SIGN_IN_METHOD_PICKER') {
                         this.passwordlessMethodSelected = false
-                        this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Sign-in method picker opened')
+                        this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '已打开登录方式选择器')
                         return true
                     }
 
@@ -586,17 +566,17 @@ export class Login {
                 }
 
                 if (canPromptForInput()) {
-                    this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Falling back to interactive email verification')
+                    this.bot.logger.info(this.bot.isMobile, 'LOGIN', '回退到交互式邮箱验证')
                     await this.codeLogin.handle(page)
                     return true
                 }
 
-                this.bot.logger.warn(this.bot.isMobile, 'LOGIN', 'No usable email verification alternative found')
+                this.bot.logger.warn(this.bot.isMobile, 'LOGIN', '未找到可用的邮箱验证备选方式')
                 return false
             }
 
             case 'CHROMEWEBDATA_ERROR': {
-                this.bot.logger.warn(this.bot.isMobile, 'LOGIN', 'chromewebdata error detected, attempting recovery')
+                this.bot.logger.warn(this.bot.isMobile, 'LOGIN', '检测到chromewebdata错误，尝试恢复')
                 for (const url of [REWARDS_BASE_URL, URLs.auth.loginLive]) {
                     this.bot.signal.throwIfAborted()
                     try {
@@ -628,56 +608,52 @@ export class Login {
             }
 
             case '2FA_TOTP': {
-                this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'TOTP 2FA authentication required')
+                this.bot.logger.info(this.bot.isMobile, 'LOGIN', '需要TOTP双因素认证')
                 await this.totp2FALogin.handle(page, account.totpSecret)
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'TOTP 2FA handler completed successfully')
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'TOTP双因素认证处理器完成')
                 return true
             }
 
             // Stay signed in / KMSI confirmation
             case 'KMSI_PROMPT': {
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Accepting KMSI prompt')
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '接受KMSI提示')
                 const clicked = await this.bot.browser.utils.click(page, this.selectors.primaryButton)
                 if (!clicked) {
-                    this.bot.logger.warn(this.bot.isMobile, 'LOGIN', 'Could not accept KMSI prompt')
+                    this.bot.logger.warn(this.bot.isMobile, 'LOGIN', '无法接受KMSI提示')
                     return false
                 }
                 await this.waitForIdle(page, 'after KMSI acceptance')
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'KMSI prompt accepted')
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'KMSI提示已接受')
                 return true
             }
 
             // Passkey prompt/error - skip back to a supported sign-in method
             case 'PASSKEY_VIDEO':
             case 'PASSKEY_ERROR': {
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Skipping Passkey prompt')
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '跳过Passkey提示')
                 const clicked = await this.bot.browser.utils.click(page, this.selectors.secondaryButton)
                 if (!clicked) {
-                    this.bot.logger.warn(this.bot.isMobile, 'LOGIN', 'Could not skip Passkey prompt')
+                    this.bot.logger.warn(this.bot.isMobile, 'LOGIN', '无法跳过Passkey提示')
                     return false
                 }
                 await this.waitForIdle(page, 'after Passkey skip')
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Passkey prompt skipped')
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Passkey提示已跳过')
                 return true
             }
 
             // Microsoft Authenticator approval/number challenge
             case 'LOGIN_PASSWORDLESS': {
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Handling passwordless authentication')
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '处理无密码认证')
                 await this.passwordlessLogin.handle(page)
                 this.passwordlessMethodSelected = false
                 await this.waitForIdle(page, 'after passwordless auth')
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Passwordless authentication completed successfully')
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '无密码认证完成')
                 return true
             }
 
             // Enter your code - prefer its alternate-method footer before Back to avoid an email-code loop
             case 'OTP_CODE_ENTRY': {
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'LOGIN',
-                    'OTP code entry page detected; trying an available alternative sign-in method'
-                )
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '检测到OTP代码输入页面；尝试可用的备选登录方式')
 
                 if (await this.checkSelector(page, this.selectors.footerAction)) {
                     const clicked = await this.bot.browser.utils.click(page, this.selectors.footerAction)
@@ -701,7 +677,7 @@ export class Login {
                                 this.bot.isMobile,
                                 'LOGIN',
                                 methodPickerVisible
-                                    ? 'Returned to sign-in method selection'
+                                    ? '已返回登录方式选择'
                                     : passwordlessLandingVisible
                                       ? 'Switched to Microsoft Authenticator sign-in'
                                       : 'Switched away from email-code authentication'
@@ -709,17 +685,13 @@ export class Login {
                             return true
                         }
 
-                        this.bot.logger.debug(
-                            this.bot.isMobile,
-                            'LOGIN',
-                            'OTP footer action did not leave the code-entry page; falling back to Back'
-                        )
+                        this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'OTP页脚操作未离开代码输入页；回退到返回按钮')
                     }
                 }
 
                 this.passwordlessMethodSelected = false
                 if (!(await this.tryClick(page, this.selectors.backButton, 'Back button'))) {
-                    this.bot.logger.warn(this.bot.isMobile, 'LOGIN', 'No usable alternative action found on OTP page')
+                    this.bot.logger.warn(this.bot.isMobile, 'LOGIN', 'OTP页面上没有可用的备选操作')
                     return false
                 }
 
@@ -733,11 +705,7 @@ export class Login {
             case 'UNKNOWN': {
                 const rawUrl = detectedUrl
                 const url = new URL(rawUrl)
-                this.bot.logger.warn(
-                    this.bot.isMobile,
-                    'LOGIN',
-                    `Unknown state at ${url.hostname}${url.pathname}, waiting`
-                )
+                this.bot.logger.warn(this.bot.isMobile, 'LOGIN', `在 ${url.hostname}${url.pathname} 的未知状态，等待中`)
 
                 if (this.bot.config.errorDiagnostics && !this.capturedUnknownUrls.has(rawUrl)) {
                     this.capturedUnknownUrls.add(rawUrl)
@@ -749,7 +717,7 @@ export class Login {
             }
 
             default:
-                this.bot.logger.debug(this.bot.isMobile, 'HANDLE-STATE', `Unhandled state: ${state}, continuing`)
+                this.bot.logger.debug(this.bot.isMobile, 'HANDLE-STATE', `未处理的状态: ${state}，继续执行`)
                 return true
         }
     }

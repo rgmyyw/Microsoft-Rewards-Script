@@ -59,7 +59,7 @@ export class EdgePlatformClient {
         })
 
         if (response.data.code !== 0) {
-            throw new Error(`Edge activity returned code ${response.data.code ?? 'unknown'}`)
+            throw new Error(`Edge 活动接口返回 code ${response.data.code ?? 'unknown'}`)
         }
 
         return {

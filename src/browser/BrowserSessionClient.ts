@@ -141,11 +141,7 @@ export class BrowserSessionClient {
     async checkpoint(source = 'SESSION-CHECKPOINT'): Promise<boolean> {
         const page = this.activePage()
         if (!page) {
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                source,
-                'Could not checkpoint session because no active browser page is available'
-            )
+            this.bot.logger.debug(this.bot.isMobile, source, '无法保存会话检查点，因为没有可用的活动浏览器页面')
             return false
         }
 
@@ -156,7 +152,7 @@ export class BrowserSessionClient {
             this.bot.logger.debug(
                 this.bot.isMobile,
                 source,
-                `Could not checkpoint active session | error=${error instanceof Error ? error.message : String(error)}`
+                `无法保存活动会话检查点 | 错误=${error instanceof Error ? error.message : String(error)}`
             )
             return false
         }
@@ -177,7 +173,7 @@ export class BrowserSessionClient {
             this.bot.logger.debug(
                 this.bot.isMobile,
                 source,
-                `Could not synchronize active browser cookies | error=${error instanceof Error ? error.message : String(error)}`
+                `无法同步活动浏览器 Cookie | 错误=${error instanceof Error ? error.message : String(error)}`
             )
             return false
         }
@@ -241,13 +237,13 @@ export class BrowserSessionClient {
             this.bot.logger.debug(
                 this.bot.isMobile,
                 source,
-                `Persisted live browser session | cookies=${storageState.cookies.length} | origins=${storageState.origins.length}`
+                `已持久化活动浏览器会话 | Cookie数=${storageState.cookies.length} | origins=${storageState.origins.length}`
             )
         } catch (error) {
             this.bot.logger.debug(
                 this.bot.isMobile,
                 source,
-                `Could not persist refreshed cookies | error=${error instanceof Error ? error.message : String(error)}`
+                `无法持久化刷新后的 Cookie | 错误=${error instanceof Error ? error.message : String(error)}`
             )
             throw error
         }
@@ -268,7 +264,7 @@ export class BrowserSessionClient {
             this.bot.logger.debug(
                 this.bot.isMobile,
                 source,
-                `Refreshed cookie cache | previous=${cachedCookies.length} | current=${liveCookies.length}`
+                `已刷新 Cookie 缓存 | 之前=${cachedCookies.length} | 当前=${liveCookies.length}`
             )
         }
 

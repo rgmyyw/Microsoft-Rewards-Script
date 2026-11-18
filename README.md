@@ -23,6 +23,20 @@ Activities depend on the account and region. This branch contains v5; earlier
 versions remain available on [v3](https://github.com/TheNetsky/Microsoft-Rewards-Script/tree/v3)
 and [v4](https://github.com/TheNetsky/Microsoft-Rewards-Script/tree/v4).
 
+## 国内适配版说明（V4-china）
+
+本仓库 fork 自 [TheNetsky/Microsoft-Rewards-Script](https://github.com/TheNetsky/Microsoft-Rewards-Script)（v5 基线），在上游之上追加以下能力：
+
+- **内嵌看板**（`dashboard/`，零依赖 Node，`DASHBOARD_ENABLED=true` 时由 entrypoint 拉起，:8300）：运行控制、账号管理（动态增删/凭据熔断 stash）、风控隔离告警、登录体检/全量体检/市场探测/网络诊断、钉钉+邮件推送。
+- **中国热搜查询源**：`queryEngines` 支持 `"china"`（gmya.net 热搜 + 限流退避），配合 `searchSettings.chinaApi.appkey`；国内推荐 `["china", "local"]`，无需代理。
+- **脚本侧通知**：PushPlus / ClawBot（微信），配置在 `webhook.pushplus` / `webhook.clawbot`。
+- **失败补跑**：`failedAccountRetry`（可配次数与冷却）。
+- **诊断工具**：`scripts/main/{loginCheck,taskProbe,marketProbe,netDiag}.js`（面板一键调用）。
+- **部署适配**：Dockerfile 国内镜像源 + noVNC 手动登录可视化；compose 时区 `Asia/Shanghai`；日志卷挂载（日志文件 90 天保留）。
+- **mac 本地运行**：`scripts/mac/`（launchd plist）。
+
+上游文档见下方 [Documentation](#documentation)。
+
 ## Documentation
 
 - [Setup and usage](docs/usage.md) — local, Nix and Docker installation, accounts, settings, commands and troubleshooting.

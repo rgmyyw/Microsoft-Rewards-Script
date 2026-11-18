@@ -38,7 +38,7 @@ export class MobileAccessLogin {
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'LOGIN-APP',
-                `Auth URL constructed: ${authorizeUrl.origin}${authorizeUrl.pathname}`
+                `认证URL构建完成: ${authorizeUrl.origin}${authorizeUrl.pathname}`
             )
 
             const code = await this.resolveCodeViaBrowser(authorizeUrl)
@@ -52,7 +52,7 @@ export class MobileAccessLogin {
                 return ''
             }
 
-            this.bot.logger.debug(this.bot.isMobile, 'LOGIN-APP', 'OAuth code resolved, exchanging for access token')
+            this.bot.logger.debug(this.bot.isMobile, 'LOGIN-APP', '已解析OAuth代码，正在交换访问令牌')
 
             const data = new URLSearchParams()
             data.append('grant_type', 'authorization_code')
@@ -115,7 +115,7 @@ export class MobileAccessLogin {
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'LOGIN-APP',
-                `OAuth browser resolved → ${this.safeUrl(oauthPage.url())} | code=${code ? 'present' : 'missing'}`
+                `OAuth浏览器解析完成 → ${this.safeUrl(oauthPage.url())} | code=${code ? 'present' : 'missing'}`
             )
 
             return code

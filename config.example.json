@@ -16,6 +16,14 @@
         "min": "15sec",
         "max": "30sec"
     },
+    "failedAccountRetry": {
+        "enabled": true,
+        "maxPasses": 1,
+        "cooldown": {
+            "min": "3min",
+            "max": "8min"
+        }
+    },
     "workers": {
         "doDailySet": true,
         "doClaimBonusPoints": true,
@@ -45,7 +53,10 @@
         "parallelSearching": true,
         "clusterSearch": true,
         "useAccountLocale": true,
-        "queryEngines": ["google", "local", "wikipedia", "rss.googleNews"],
+        "queryEngines": ["china", "local"],
+        "chinaApi": {
+            "appkey": ""
+        },
         "searchResultVisitTime": "10sec",
         "searchDelay": {
             "min": "30sec",
@@ -91,6 +102,17 @@
             "title": "Microsoft-Rewards-Script",
             "tags": ["bot", "notify"],
             "priority": 3
+        },
+        "pushplus": {
+            "enabled": false,
+            "token": "",
+            "title": "微软奖励脚本",
+            "template": "html",
+            "channel": ""
+        },
+        "clawbot": {
+            "enabled": false,
+            "authFile": ""
         },
         "webhookLogFilter": {
             "enabled": false,

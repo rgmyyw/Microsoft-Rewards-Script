@@ -219,7 +219,7 @@ export class AccountData implements AccountDataSource {
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'EARN-SNAPSHOT',
-                `Failed to fetch ${route} over http | ${error instanceof Error ? error.message : String(error)}`
+                `通过 HTTP 获取 ${route} 失败 | ${error instanceof Error ? error.message : String(error)}`
             )
             return null
         }

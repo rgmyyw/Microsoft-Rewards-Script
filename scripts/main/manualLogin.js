@@ -1,6 +1,6 @@
 import { buildBrowserProxy } from '../lib/proxy.cjs'
+import { newInjectedContext } from 'fingerprint-injector'
 import BROWSER_ARGS from '../lib/browser-args.json' with { type: 'json' }
-/* global window */
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -233,20 +233,25 @@ async function runRedeem({ account, config, dbPath }) {
     let stored = null
     for (const candidate of ['desktop', 'mobile']) {
         const s = loadStoredSession(dbPath, account.email, candidate, false)
-        if (s?.storageState?.cookies?.length) { platform = candidate; stored = s; break }
+        if (s?.storageState?.cookies?.length) {
+            platform = candidate
+            stored = s
+            break
+        }
     }
     if (!platform) {
         throw new Error(`No saved session for ${account.email}; run the account once or use manual login first`)
     }
 
     const isMobile = platform === 'mobile'
-    const locale = resolveLocale(account, stored.resolvedCountry)
+    const { resolveAccountLocale, fingerprintMatchesLocale } = await import('../../dist/util/Locale.js')
+    const locale = resolveAccountLocale(account, stored.resolvedCountry)
     const savesFingerprint = isMobile ? account.saveFingerprint.mobile : account.saveFingerprint.desktop
     const canReuseFingerprint =
         savesFingerprint && stored.fingerprint && fingerprintMatchesLocale(stored.fingerprint, locale)
-    const fingerprint = canReuseFingerprint ? stored.fingerprint : createFingerprint(isMobile, locale)
+    const fingerprint = canReuseFingerprint ? stored.fingerprint : createFingerprint(isMobile, locale, 'windows')
     const screen = fingerprint.fingerprint.screen
-    const proxy = buildProxyConfig(account)
+    const proxy = buildBrowserProxy(account.proxy)
     const runningAsRoot = typeof process.getuid === 'function' && process.getuid() === 0
     const sandboxArgs =
         process.platform === 'linux' && runningAsRoot ? ['--no-sandbox', '--disable-setuid-sandbox'] : []
@@ -273,7 +278,10 @@ async function runRedeem({ account, config, dbPath }) {
             const storageState = context ? await context.storageState() : null
             if (storageState?.cookies?.length) {
                 saveManualSession(dbPath, account.email, platform, storageState, fingerprint, savesFingerprint)
-                log('SUCCESS', `Saved ${platform} session for ${account.email} | cookies=${storageState.cookies.length}`)
+                log(
+                    'SUCCESS',
+                    `Saved ${platform} session for ${account.email} | cookies=${storageState.cookies.length}`
+                )
             } else {
                 log('WARN', 'Browser had no cookies at close; keeping stored session unchanged')
             }
@@ -309,12 +317,16 @@ async function runRedeem({ account, config, dbPath }) {
         context = injected
         context.setDefaultTimeout(globalTimeout)
         const page = await context.newPage()
-        await page.goto('https://rewards.bing.com/redeem', { waitUntil: 'domcontentloaded', timeout: globalTimeout }).catch(error => {
-            log('WARN', `Redeem navigation did not finish cleanly: ${error.message}`)
-        })
+        await page
+            .goto('https://rewards.bing.com/redeem', { waitUntil: 'domcontentloaded', timeout: globalTimeout })
+            .catch(error => {
+                log('WARN', `Redeem navigation did not finish cleanly: ${error.message}`)
+            })
         log('INFO', `Redeem page opened for ${account.email} (${platform}); browse/operate in the browser window`)
         log('INFO', 'Session ends via the dashboard (结束按钮/超时) or Ctrl+C; cookies will be saved on exit')
-        await new Promise(resolve => { finish = resolve })
+        await new Promise(resolve => {
+            finish = resolve
+        })
     } finally {
         process.removeListener('SIGINT', onSigInt)
         process.removeListener('SIGTERM', onSigTerm)

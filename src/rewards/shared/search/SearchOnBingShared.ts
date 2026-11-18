@@ -87,14 +87,14 @@ export async function runSearchOnBingQueries(
             bot.logger.debug(
                 bot.isMobile,
                 'SEARCH-ON-BING-SEARCH',
-                `${index + 1}/${queries.length} | activity not complete | offerProgress=${offerProgress} | query="${query}"`
+                `${index + 1}/${queries.length} | 活动未完成 | 活动进度=${offerProgress} | 查询="${query}"`
             )
         } catch (error) {
             bot.signal.throwIfAborted()
             bot.logger.error(
                 bot.isMobile,
                 'SEARCH-ON-BING-SEARCH',
-                `Error during search loop | query="${query}" | message=${error instanceof Error ? error.message : String(error)}`
+                `搜索循环出错 | 查询="${query}" | 错误=${error instanceof Error ? error.message : String(error)}`
             )
         } finally {
             if (!completed && index < queries.length - 1 && attempted.size < limit) {

@@ -39,7 +39,7 @@ import {
     openSessionDb,
     parseArgs,
     resolveEmailArgument
-} from '../utils.js'
+} from '../lib/commandUtils.js'
 
 const USER_INFO_URL = 'https://rewards.bing.com/api/getuserinfo'
 const FLYOUT_URL = 'https://www.bing.com/rewards/panelflyout/getuserinfo?channel=BingFlyout&partnerId=BingRewards'
@@ -117,14 +117,18 @@ function loadStoredSession(dbPath, email) {
 // 与 taskProbe 同款: 不合并重名 cookie, 按路径长度降序拼接
 function buildCookieHeader(storageState) {
     const cookies = Array.isArray(storageState?.cookies) ? storageState.cookies : []
-    const matched = cookies.filter(c => String(c.domain || '').toLowerCase().endsWith('bing.com'))
+    const matched = cookies.filter(c =>
+        String(c.domain || '')
+            .toLowerCase()
+            .endsWith('bing.com')
+    )
     matched.sort((a, b) => {
         const pl = (b.path || '/').length - (a.path || '/').length
         if (pl !== 0) return pl
         const ad = String(a.domain || '').toLowerCase()
         const bd = String(b.domain || '').toLowerCase()
         if (ad === bd) return 0
-        return ad === 'rewards.bing.com' ? -1 : (bd === 'rewards.bing.com' ? 1 : 0)
+        return ad === 'rewards.bing.com' ? -1 : bd === 'rewards.bing.com' ? 1 : 0
     })
     if (!matched.length) return ''
     return matched.map(c => `${c.name}=${c.value}`).join('; ')
@@ -163,7 +167,12 @@ async function fetchStatus(url, cookieHeader, headers, referer) {
     const timer = setTimeout(() => controller.abort(), 15000)
     try {
         const res = await fetch(url, {
-            headers: { ...headers, Cookie: cookieHeader, Accept: 'application/json, text/plain, */*', Referer: referer },
+            headers: {
+                ...headers,
+                Cookie: cookieHeader,
+                Accept: 'application/json, text/plain, */*',
+                Referer: referer
+            },
             redirect: 'manual',
             signal: controller.signal
         })
@@ -179,13 +188,20 @@ async function fetchStatus(url, cookieHeader, headers, referer) {
 // + 封禁状态(主接口状态码 + isRewardsUser 字段)
 async function probeHttp(cookieHeader, fpHeaders) {
     const out = { profile: null, service: null, banned: null }
-    const userInfo = await fetchWithCookie(USER_INFO_URL, cookieHeader, {
-        ...fpHeaders,
-        Origin: 'https://rewards.bing.com'
-    }, 'https://rewards.bing.com/')
+    const userInfo = await fetchWithCookie(
+        USER_INFO_URL,
+        cookieHeader,
+        {
+            ...fpHeaders,
+            Origin: 'https://rewards.bing.com'
+        },
+        'https://rewards.bing.com/'
+    )
     const pc = userInfo?.dashboard?.userProfile?.attributes?.country ?? userInfo?.userProfile?.attributes?.country
     if (typeof pc === 'string' && /^[a-z]{2}$/i.test(pc)) out.profile = pc.toLowerCase()
-    const flyout = await fetchWithCookie(FLYOUT_URL, cookieHeader, fpHeaders, 'https://www.bing.com/', { manualRedirect: false })
+    const flyout = await fetchWithCookie(FLYOUT_URL, cookieHeader, fpHeaders, 'https://www.bing.com/', {
+        manualRedirect: false
+    })
     const sc = flyout?.userInfo?.rewardsCountry ?? flyout?.userInfo?.autoRedeemProfile?.country
     if (typeof sc === 'string' && /^[a-z]{2}$/i.test(sc)) out.service = sc.toLowerCase()
     // isRewardsUser=false = 积分商城资格被暂停(封禁); 可信源仅两处, flyout 不算:
@@ -194,10 +210,11 @@ async function probeHttp(cookieHeader, fpHeaders) {
     //   - getuserinfo 主接口 HTTP(仅部分账号可达): dashboard.userStatus.isRewardsUser;
     //   - 浏览器内主接口(登录态完整, 全账号可得, 同 loginCheck 生产模式)。
     // 注意不能用余额门控: 被封号积分冻结后余额同样为 0。
-    const collectBanned = (src) => {
+    const collectBanned = src => {
         const errCode = src?.userStatus?.errorCode ?? src?.errorCode ?? null
         const isRewardsUser = src?.userStatus?.isRewardsUser ?? src?.isRewardsUser
-        if ((errCode === 0 || errCode === null || errCode === undefined) && typeof isRewardsUser === 'boolean') return !isRewardsUser
+        if ((errCode === 0 || errCode === null || errCode === undefined) && typeof isRewardsUser === 'boolean')
+            return !isRewardsUser
         return null
     }
     const bannedMain = userInfo ? collectBanned(userInfo?.dashboard ?? userInfo) : null
@@ -205,7 +222,12 @@ async function probeHttp(cookieHeader, fpHeaders) {
     else if (bannedMain === false) out.banned = false
     else {
         // 字段不可读时按主接口状态码判: 403=封禁; 302→Signin=会话受限(长期正常现象)
-        const st = await fetchStatus(USER_INFO_URL, cookieHeader, { ...fpHeaders, Origin: 'https://rewards.bing.com' }, 'https://rewards.bing.com/')
+        const st = await fetchStatus(
+            USER_INFO_URL,
+            cookieHeader,
+            { ...fpHeaders, Origin: 'https://rewards.bing.com' },
+            'https://rewards.bing.com/'
+        )
         if (st === 403) out.banned = true
         else if (st === 200 || st === 302) out.banned = false
     }
@@ -218,14 +240,24 @@ async function probeRedeemBrowser(stored, account) {
     const languageTag = new Intl.Locale(account.langCode || 'en').toString()
     const language = new Intl.Locale(languageTag).language.toLowerCase()
     const acceptedLocales = [languageTag, language]
-    const fingerprint = (stored.fingerprint?.fingerprint)
+    const fingerprint = stored.fingerprint?.fingerprint
         ? stored.fingerprint
-        : new FingerprintGenerator().getFingerprint({ devices: ['desktop'], browsers: [{ name: 'edge' }], operatingSystems: ['windows'], locales: acceptedLocales })
+        : new FingerprintGenerator().getFingerprint({
+              devices: ['desktop'],
+              browsers: [{ name: 'edge' }],
+              operatingSystems: ['windows'],
+              locales: acceptedLocales
+          })
     const proxy = buildProxyConfig(account)
     const runningAsRoot = typeof process.getuid === 'function' && process.getuid() === 0
-    const sandboxArgs = process.platform === 'linux' && runningAsRoot ? ['--no-sandbox', '--disable-setuid-sandbox'] : []
+    const sandboxArgs =
+        process.platform === 'linux' && runningAsRoot ? ['--no-sandbox', '--disable-setuid-sandbox'] : []
 
-    const browser = await chromium.launch({ headless: true, ...(proxy ? { proxy } : {}), args: [...BROWSER_ARGS, ...sandboxArgs] })
+    const browser = await chromium.launch({
+        headless: true,
+        ...(proxy ? { proxy } : {}),
+        args: [...BROWSER_ARGS, ...sandboxArgs]
+    })
     try {
         const context = await newInjectedContext(browser, {
             fingerprint,
@@ -243,7 +275,9 @@ async function probeRedeemBrowser(stored, account) {
         let banned = null
         let bannedBalance = null
         try {
-            await page.goto('https://rewards.bing.com/', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {})
+            await page
+                .goto('https://rewards.bing.com/', { waitUntil: 'domcontentloaded', timeout: 60000 })
+                .catch(() => {})
             await page.waitForTimeout(5000)
             const info = await page.evaluate(async () => {
                 let res = null
@@ -251,7 +285,9 @@ async function probeRedeemBrowser(stored, account) {
                     try {
                         res = await fetch('/api/getuserinfo', { credentials: 'include' })
                         if (res.ok) break
-                    } catch (e) { /* retry */ }
+                    } catch (e) {
+                        /* retry */
+                    }
                     await new Promise(r => setTimeout(r, 2000))
                 }
                 if (!res) return { ok: false, status: 0 }
@@ -261,7 +297,12 @@ async function probeRedeemBrowser(stored, account) {
                 try {
                     const json = await res.json()
                     const us = json?.dashboard?.userStatus ?? json?.userStatus ?? {}
-                    return { ok: true, isRewardsUser: us.isRewardsUser ?? null, balance: us.availablePoints ?? null, signinRedirect }
+                    return {
+                        ok: true,
+                        isRewardsUser: us.isRewardsUser ?? null,
+                        balance: us.availablePoints ?? null,
+                        signinRedirect
+                    }
                 } catch {
                     return { ok: false, status: res.status, nonJson: true, signinRedirect }
                 }
@@ -283,24 +324,31 @@ async function probeRedeemBrowser(stored, account) {
             log('WARN', `redeem 导航未干净完成: ${error.message}`)
         })
         await page.waitForTimeout(9000) // SPA 渲染目录与横幅
-        const redeem = await page.evaluate(markers => {
-            const out = { landing: null, switchBack: null, banner: false }
-            const marketRe = new RegExp(markers.marketRe, 'i')
-            const switchBackText = new RegExp(markers.switchBackText, 'i')
-            const lm = location.pathname.match(marketRe)
-            if (lm) out.landing = lm[1].toLowerCase()
-            for (const a of document.querySelectorAll('a[href]')) {
-                const href = String(a.getAttribute('href') || '')
-                const m = href.match(marketRe)
-                if (!m) continue
-                const market = m[1].toLowerCase()
-                const text = (a.textContent || '').trim()
-                if (switchBackText.test(text)) out.switchBack = market
+        const redeem = await page.evaluate(
+            markers => {
+                const out = { landing: null, switchBack: null, banner: false }
+                const marketRe = new RegExp(markers.marketRe, 'i')
+                const switchBackText = new RegExp(markers.switchBackText, 'i')
+                const lm = location.pathname.match(marketRe)
+                if (lm) out.landing = lm[1].toLowerCase()
+                for (const a of document.querySelectorAll('a[href]')) {
+                    const href = String(a.getAttribute('href') || '')
+                    const m = href.match(marketRe)
+                    if (!m) continue
+                    const market = m[1].toLowerCase()
+                    const text = (a.textContent || '').trim()
+                    if (switchBackText.test(text)) out.switchBack = market
+                }
+                const body = (document.body.innerText || '').toLowerCase()
+                out.banner = markers.bannerHints.some(h => body.includes(h))
+                return out
+            },
+            {
+                marketRe: MARKET_RE.source,
+                switchBackText: SWITCH_BACK_TEXT.source,
+                bannerHints: BANNER_HINTS.map(s => s.toLowerCase())
             }
-            const body = (document.body.innerText || '').toLowerCase()
-            out.banner = markers.bannerHints.some(h => body.includes(h))
-            return out
-        }, { marketRe: MARKET_RE.source, switchBackText: SWITCH_BACK_TEXT.source, bannerHints: BANNER_HINTS.map(s => s.toLowerCase()) })
+        )
         redeem.banned = banned
         redeem.bannedBalance = bannedBalance
         return redeem
@@ -351,7 +399,7 @@ async function probeAccount(account, dbPath) {
         // 封禁判定: 浏览器登录态主接口为最权威源(HTTP 主接口可达时已先取, 浏览器值覆盖)
         if (redeem.banned !== null && redeem.banned !== undefined) result.banned = redeem.banned
         // 归属市场: 「切换回我的国家」链接优先; 无该链接且无横幅 → 归属与落地一致
-        result.market = redeem.switchBack || ((redeem.banner && !redeem.switchBack) ? null : redeem.landing)
+        result.market = redeem.switchBack || (redeem.banner && !redeem.switchBack ? null : redeem.landing)
         if (!redeem.landing) {
             result.error = 'redeem-not-reached(会话可能失效)'
         } else {
@@ -393,7 +441,10 @@ async function main() {
         market.accounts[account.email] = r
         market.updatedAt = Date.now()
         saveMarketFile(market) // 每号即存, 中断不丢已完成部分
-        log('INFO', `${account.email}: 市场=${r.market ?? '?'} 落地=${r.landing ?? '?'} 服务=${r.service ?? '?'} 档案=${r.profile ?? '?'} 封禁=${r.banned === true ? '是' : (r.banned === false ? '否' : '?')} 横幅=${r.banner}${r.error ? ' | ' + r.error : ''}`)
+        log(
+            'INFO',
+            `${account.email}: 市场=${r.market ?? '?'} 落地=${r.landing ?? '?'} 服务=${r.service ?? '?'} 档案=${r.profile ?? '?'} 封禁=${r.banned === true ? '是' : r.banned === false ? '否' : '?'} 横幅=${r.banner}${r.error ? ' | ' + r.error : ''}`
+        )
         if (account !== targets[targets.length - 1]) await new Promise(res => setTimeout(res, 2000))
     }
     console.log('MARKETPROBE_RESULT ' + JSON.stringify({ ok: results.some(r => r.ok), results }))

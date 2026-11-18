@@ -46,6 +46,23 @@ docker_log_command entrypoint info node dist/config/ConfigEnvOverrides.js apply 
 ln -sf "$CONFIG_FILE" "$SCRIPT_DIR/config.json"
 docker_log entrypoint info "[entrypoint] Config ready."
 
+# Optional embedded web dashboard (zero-dependency Node, talks to the local control API).
+# Data (push-config/state) persists under $DASHBOARD_DATA_DIR inside the mounted config volume.
+if [ "${DASHBOARD_ENABLED:-true}" = "true" ]; then
+    export DASHBOARD_DATA_DIR="${DASHBOARD_DATA_DIR:-$SCRIPT_DIR/config/dashboard}"
+    mkdir -p "$DASHBOARD_DATA_DIR"
+    docker_log entrypoint info "[entrypoint] Starting dashboard on ${DASHBOARD_PORT:-8300} (data: $DASHBOARD_DATA_DIR)"
+    (
+        while true; do
+            # || true: entrypoint 开启了 set -e, 看板进程被 kill 或崩溃(非零退出)会
+            # 触发 errexit 连带杀死本守护循环, 导致看板死后无人重启
+            node "$SCRIPT_DIR/dashboard/server.js" || true
+            docker_log entrypoint warn "[entrypoint] dashboard exited, restarting in 5s"
+            sleep 5
+        done
+    ) &
+fi
+
 # Run an explicit container command after preparing the configuration.
 if [ "$#" -gt 0 ]; then
     exec "$@"

@@ -62,7 +62,7 @@ const DelaySchema = z
     })
 
 const QueryEngineSchema = z.union([
-    z.enum(['google', 'wikipedia', 'wikirandom', 'hackernews', 'reddit', 'local']),
+    z.enum(['china', 'google', 'wikipedia', 'wikirandom', 'hackernews', 'reddit', 'local']),
     z
         .string()
         .regex(/^rss(\.[A-Za-z0-9_-]+){0,2}$/, 'Invalid rss selector (use rss, rss.<site>, or rss.<site>.<endpoint>)')
@@ -116,6 +116,21 @@ const WebhookSchema = z.strictObject({
             chatId: z.union([z.string(), z.number()])
         })
         .optional(),
+    pushplus: z
+        .strictObject({
+            enabled: z.boolean().optional(),
+            token: z.string(),
+            title: z.string().optional(),
+            template: z.enum(['txt', 'html', 'markdown']).optional(),
+            channel: z.string().optional()
+        })
+        .optional(),
+    clawbot: z
+        .strictObject({
+            enabled: z.boolean().optional(),
+            authFile: z.string().optional()
+        })
+        .optional(),
     webhookLogFilter: LogFilterSchema
 })
 
@@ -131,6 +146,13 @@ const ConfigSchema = z.strictObject({
     skipNonPointTasks: z.boolean().default(defaultConfig.skipNonPointTasks),
     accountDelay: DelaySchema.default(defaultConfig.accountDelay),
     taskDelay: DelaySchema.default(defaultConfig.taskDelay),
+    failedAccountRetry: z
+        .strictObject({
+            enabled: z.boolean(),
+            maxPasses: z.number().int().nonnegative(),
+            cooldown: DelaySchema
+        })
+        .default(defaultConfig.failedAccountRetry),
     workers: z.strictObject({
         doDailySet: z.boolean(),
         doMorePromotions: z.boolean(),
@@ -172,6 +194,11 @@ const ConfigSchema = z.strictObject({
         clusterSearch: z.boolean().default(defaultConfig.searchSettings.clusterSearch),
         useAccountLocale: z.boolean().default(defaultConfig.searchSettings.useAccountLocale),
         queryEngines: z.array(QueryEngineSchema).min(1),
+        chinaApi: z
+            .strictObject({
+                appkey: z.string()
+            })
+            .default(defaultConfig.searchSettings.chinaApi),
         searchResultVisitTime: DurationValue,
         searchDelay: DelaySchema,
         readDelay: DelaySchema

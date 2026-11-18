@@ -65,7 +65,7 @@ export class LoginSession {
     ) {}
 
     async finalize(page: Page, account: Account, sessionOnly = false) {
-        this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Finalizing login')
+        this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '完成登录')
 
         const browserMode = this.bot.config.rewardsMode === 'browser' && !sessionOnly
         if (browserMode) {
@@ -82,12 +82,12 @@ export class LoginSession {
         const loginRewardsSuccess = rewardsHostname === 'bing.com' || rewardsHostname.endsWith('.bing.com')
         if (loginRewardsSuccess) {
             if (rewardsHostname === 'rewards.bing.com') {
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Logged into Microsoft Rewards successfully')
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '成功登录Microsoft Rewards')
             } else {
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'LOGIN',
-                    `Rewards sign-in redirected to Bing home (${rewardsHostname}); continuing verification`
+                    `Rewards登录重定向到Bing主页 (${rewardsHostname})；继续验证`
                 )
             }
         } else {
@@ -101,7 +101,7 @@ export class LoginSession {
         // Dismiss at rewards dashboard
         await this.bot.browser.utils.dismissMessages(page).catch(() => undefined)
 
-        this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Starting Bing session verification')
+        this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '开始Bing会话验证')
         const verification = browserMode ? await BrowserTaskPage.create(page) : undefined
         try {
             const verified = await this.verifyBingSession(verification?.page ?? page, account)
@@ -111,7 +111,7 @@ export class LoginSession {
         }
 
         if (!sessionOnly) {
-            this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Acquiring rewards context')
+            this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '获取奖励上下文')
             await this.getRewardsSession(page)
         }
 
@@ -123,19 +123,19 @@ export class LoginSession {
         this.bot.logger.debug(
             this.bot.isMobile,
             'LOGIN',
-            `Saving session | cookies=${storageState.cookies.length} | origins=${storageState.origins.length}`
+            `正在保存会话 | Cookie数=${storageState.cookies.length} | origins=${storageState.origins.length}`
         )
         saveStorageState(this.bot.config.sessionPath, account.email, this.bot.isMobile, storageState)
 
         await configureMediaBlocking(this.bot, context)
-        this.bot.logger.debug(this.bot.isMobile, 'LOGIN', 'Login completed, session saved')
+        this.bot.logger.debug(this.bot.isMobile, 'LOGIN', '登录完成，会话已保存')
     }
 
     async verifyBingSession(page: Page, account: Account): Promise<boolean> {
         const url = URLs.auth.bingSignIn
         const loopMax = 5
 
-        this.bot.logger.debug(this.bot.isMobile, 'LOGIN-BING', 'Verifying Bing session')
+        this.bot.logger.debug(this.bot.isMobile, 'LOGIN-BING', '验证Bing会话')
 
         try {
             await page
@@ -146,7 +146,7 @@ export class LoginSession {
                 this.bot.signal.throwIfAborted()
                 if (page.isClosed()) break
 
-                this.bot.logger.debug(this.bot.isMobile, 'LOGIN-BING', `Verification loop ${i + 1}/${loopMax}`)
+                this.bot.logger.debug(this.bot.isMobile, 'LOGIN-BING', `验证循环 ${i + 1}/${loopMax}`)
 
                 let u = new URL(page.url())
                 let hostname = u.hostname.toLowerCase()
@@ -164,7 +164,7 @@ export class LoginSession {
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'LOGIN-BING',
-                    `At Bing page: ${atBingPage} (${hostname}${u.pathname})`
+                    `在Bing页面: ${atBingPage} (${hostname}${u.pathname})`
                 )
 
                 if (atBingPage) {
@@ -197,14 +197,14 @@ export class LoginSession {
             this.bot.logger.warn(
                 this.bot.isMobile,
                 'LOGIN-BING',
-                `Verification error: ${error instanceof Error ? error.message : String(error)}`
+                `验证错误: ${error instanceof Error ? error.message : String(error)}`
             )
         }
         return false
     }
 
     private async getRewardsSession(page: Page) {
-        this.bot.logger.debug(this.bot.isMobile, 'GET-REWARD-SESSION', 'Bootstrapping rewards context')
+        this.bot.logger.debug(this.bot.isMobile, 'GET-REWARD-SESSION', '引导奖励上下文')
 
         try {
             await this.bot.rewards.bootstrap(page)
@@ -219,7 +219,7 @@ export class LoginSession {
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'GET-REWARD-SESSION',
-                    'No action ids resolved - server-action calls (report/streak protection) will be skipped this run'
+                    '未解析到操作ID - 本次运行将跳过服务器操作调用（报告/连击保护）'
                 )
             }
 
@@ -227,25 +227,21 @@ export class LoginSession {
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'GET-REWARD-SESSION',
-                    'Page snapshot empty - neither /earn nor /dashboard rendered a usable RSC payload'
+                    '页面快照为空 - /earn 和 /dashboard 均未渲染出可用的RSC数据'
                 )
             }
 
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'GET-REWARD-SESSION',
-                `Context ready | actions=${actionsCount} | reportable=${reportableCount} | available=${availablePoints}`
+                `上下文就绪 | actions=${actionsCount} | reportable=${reportableCount} | available=${availablePoints}`
             )
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error)
 
-            this.bot.logger.error(
-                this.bot.isMobile,
-                'GET-REWARD-SESSION',
-                `Failed to acquire rewards context: ${message}`
-            )
+            this.bot.logger.error(this.bot.isMobile, 'GET-REWARD-SESSION', `获取奖励上下文失败: ${message}`)
 
-            throw new Error(`Failed to acquire rewards context: ${message}`)
+            throw new Error(`获取奖励上下文失败: ${message}`)
         }
     }
 }

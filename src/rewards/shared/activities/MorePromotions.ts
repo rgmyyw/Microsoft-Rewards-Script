@@ -23,9 +23,9 @@ export class MorePromotions extends BaseActivity {
         this.bot.logger.info(
             this.bot.isMobile,
             'MORE-PROMOTIONS',
-            `Started solving "More Promotions" items | remaining=${pending.length}`
+            `开始解决"更多推广"项目 | remaining=${pending.length}`
         )
         await new PromotionRunner(this.bot).run(pending, 'more-promotions')
-        this.bot.logger.debug(this.bot.isMobile, 'MORE-PROMOTIONS', 'Finished processing "More Promotions" items')
+        this.bot.logger.debug(this.bot.isMobile, 'MORE-PROMOTIONS', '"更多推广"项目处理完毕')
     }
 }

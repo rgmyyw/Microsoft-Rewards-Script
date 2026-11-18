@@ -124,7 +124,7 @@ function parseSetCookie(raw: string, requestUrl: string): { cookie: Cookie; remo
         } else if (attributeName === 'samesite') {
             const normalized = attributeValue.toLowerCase()
             if (normalized === 'strict') sameSite = 'Strict'
-            else if (normalized === 'none') sameSite = 'None'
+            else if (normalized === '无') sameSite = 'None'
             else sameSite = 'Lax'
         }
     }

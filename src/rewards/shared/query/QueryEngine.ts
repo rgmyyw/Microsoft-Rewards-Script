@@ -36,6 +36,7 @@ export class QueryEngine {
             `Fetching main topics | localeMode=${locale.mode} | language=${language} | country=${country} | engines=${sourceOrder.join(',')}`
         )
         const sourceHandlers: Record<QueryEngineName, () => Promise<QueryTopic[]> | QueryTopic[]> = {
+            china: () => this.sources.getChinaTrending(country),
             google: () => this.sources.getGoogleTrends(country, language),
             wikipedia: () => this.sources.getWikipediaTrending(language),
             wikirandom: () => this.sources.getWikipediaRandom(language),

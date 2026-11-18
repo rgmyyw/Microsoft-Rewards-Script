@@ -19,7 +19,7 @@ export async function readEarnPage(page: Page) {
                 .trim()
         const visible = (element: Element) => {
             const style = getComputedStyle(element)
-            return style.visibility !== 'hidden' && style.display !== 'none' && element.getClientRects().length > 0
+            return style.visibility !== 'hidden' && style.display !== '无' && element.getClientRects().length > 0
         }
         const balances = elements
             .filter(visible)

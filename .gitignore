@@ -14,3 +14,9 @@ note
 .env.*
 *.bak
 *.log
+# ClawBot 微信推送的扫码凭证（含 bot token），严禁提交
+/clawbot-auth.json
+# 本地私密配置与编辑器工作目录，严禁提交
+/.zcode/
+.envlogs/
+/logs

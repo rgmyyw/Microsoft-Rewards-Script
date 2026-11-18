@@ -25,11 +25,11 @@ export class AppPromotions extends BaseActivity {
         this.bot.logger.info(
             this.bot.isMobile,
             'APP-PROMOTIONS',
-            `Started solving "App Promotions" items | remaining=${pending.length}`
+            `开始解决"应用推广"项目 | remaining=${pending.length}`
         )
         for (const promotion of pending) {
             await this.bot.activities.runAppReward(promotion)
         }
-        this.bot.logger.debug(this.bot.isMobile, 'APP-PROMOTIONS', 'Finished processing "App Promotions" items')
+        this.bot.logger.debug(this.bot.isMobile, 'APP-PROMOTIONS', '"应用推广"项目处理完毕')
     }
 }

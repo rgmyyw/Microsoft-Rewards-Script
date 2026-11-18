@@ -1,7 +1,7 @@
-import { httpRequest } from '../util/Http'
-import type { HttpRequestConfig } from '../util/Http'
+import { httpRequest } from '../network/HttpClient'
+import type { HttpRequestConfig } from '../network/HttpClient'
 import PQueue from 'p-queue'
-import type { WebhookPushPlusConfig } from '../interface/Config'
+import type { WebhookPushPlusConfig } from '../config/Config'
 import { flushQueue } from './Queue'
 
 const pushPlusQueue = new PQueue({

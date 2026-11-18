@@ -150,8 +150,7 @@ export async function readRewardCards(page: Page, controls: Locator): Promise<Re
                 controlName: text(labelledBy || element.getAttribute('aria-label') || element.textContent),
                 parentControlIndex,
                 section: element.closest('section[id]')?.id ?? '',
-                visible:
-                    style.visibility !== 'hidden' && style.display !== 'none' && element.getClientRects().length > 0,
+                visible: style.visibility !== 'hidden' && style.display !== '无' && element.getClientRects().length > 0,
                 disabled: Boolean(
                     element.closest('[aria-disabled="true"], [data-disabled], [disabled], [inert]') ||
                     card.querySelector('.locked_point, .locked_level_required_text, #locked_level_required_text')

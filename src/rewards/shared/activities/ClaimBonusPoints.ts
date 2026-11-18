@@ -162,7 +162,7 @@ export class ClaimBonusPoints extends BaseActivity {
             this.bot.logger.error(
                 this.bot.isMobile,
                 'CLAIM-BONUS-POINTS',
-                `Error in claimBonusPoints | message=${error instanceof Error ? error.message : String(error)}`
+                `claimBonusPoints 出错 | message=${error instanceof Error ? error.message : String(error)}`
             )
             return activityFailure(error)
         } finally {

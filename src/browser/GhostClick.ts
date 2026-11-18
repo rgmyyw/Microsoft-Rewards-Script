@@ -30,7 +30,7 @@ export async function ghostClick(
                 const box = element.getBoundingClientRect()
                 if (
                     !element.isConnected ||
-                    style.display === 'none' ||
+                    style.display === '无' ||
                     style.visibility !== 'visible' ||
                     !box.width ||
                     !box.height

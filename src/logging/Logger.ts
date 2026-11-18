@@ -1,4 +1,7 @@
 import cluster from 'node:cluster'
+import fs from 'node:fs'
+import path from 'node:path'
+import { getProjectRoot } from '../../scripts/lib/projectFiles.cjs'
 import { sendNotifications } from './Notifications'
 import type { BotContext } from '../core/BotContext'
 import { errorDiagnostic } from '../util/ErrorDiagnostic'
@@ -38,6 +41,61 @@ function formatMessage(message: string | Error, debugEnabled: boolean): string {
         .join(' <- ')
 
     return sanitizeLogMessage(stackFrames ? `${message.message} | stack=${stackFrames}` : message.message)
+}
+
+/**
+ * 日志文件目录（首次写入时解析，避免每条日志都做磁盘检查）
+ */
+let logFileDir: string | null = null
+
+function getLogFilePath(now: Date): string | null {
+    try {
+        if (!logFileDir) {
+            logFileDir = path.join(getProjectRoot(), 'logs')
+            fs.mkdirSync(logFileDir, { recursive: true })
+        }
+        const y = String(now.getFullYear())
+        const m = String(now.getMonth() + 1).padStart(2, '0')
+        const d = String(now.getDate()).padStart(2, '0')
+        return path.join(logFileDir, y + '-' + m + '-' + d + '.log')
+    } catch (error) {
+        console.error('[Logger] 创建日志目录失败:', error)
+        logFileDir = null
+        return null
+    }
+}
+
+/**
+ * 本地时区的 YYYY-MM-DD HH:mm:ss(.sss) 时间戳，用于日志与推送展示
+ */
+export function formatLocalTimestamp(date: Date, withMilliseconds = false): string {
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const base =
+        date.getFullYear() +
+        '-' +
+        pad(date.getMonth() + 1) +
+        '-' +
+        pad(date.getDate()) +
+        ' ' +
+        pad(date.getHours()) +
+        ':' +
+        pad(date.getMinutes()) +
+        ':' +
+        pad(date.getSeconds())
+    return withMilliseconds ? base + '.' + String(date.getMilliseconds()).padStart(3, '0') : base
+}
+
+/**
+ * 将日志追加写入 logs/YYYY-MM-DD.log（按本地日期分文件）
+ */
+function writeLogToFile(logContent: string): void {
+    try {
+        const logFilePath = getLogFilePath(new Date())
+        if (!logFilePath) return
+        fs.appendFileSync(logFilePath, formatLocalTimestamp(new Date(), true) + ' ' + logContent + '\n', 'utf8')
+    } catch (error) {
+        console.error('[Logger] 写入日志文件失败:', error)
+    }
 }
 
 export class Logger {
@@ -98,6 +156,9 @@ export class Logger {
             title,
             message: formatted
         })
+
+        // 保存日志到本地文件
+        writeLogToFile(cleanMsg)
 
         if (level === 'error' && config.errorDiagnostics) {
             const mobile = isMobile === 'main' ? this.bot.isMobile : isMobile

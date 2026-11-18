@@ -43,7 +43,7 @@ function inspectScroll(element: Element, destination: { x: number; y: number } |
         const style = getComputedStyle(element)
         if (
             !element.isConnected ||
-            style.display === 'none' ||
+            style.display === '无' ||
             style.visibility !== 'visible' ||
             !box.width ||
             !box.height ||

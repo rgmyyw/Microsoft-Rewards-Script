@@ -12,19 +12,75 @@
  * 汇总微软域连接的 chains + DNS 特征 + www.bing.com 落地旁证, 输出结论。
  *
  * Usage: node scripts/main/netDiag.js
- * 环境变量: CLASH_API_URL(默认 http://192.168.100.1:9090)、CLASH_API_SECRET
+ * 环境变量: CLASH_API_URL(未配置则跳过 Clash 路由检查，仅做 DNS/可达性判定)、CLASH_API_SECRET
  * 最后一行: NETDIAG_RESULT {verdict,...}
  */
 
 import dns from 'node:dns/promises'
+import fs from 'node:fs'
+import path from 'node:path'
 
-import { getDirname, getProjectRoot, log } from '../utils.js'
+import { getDirname, log } from '../lib/commandUtils.js'
 
 const __dirname = getDirname(import.meta.url)
-const projectRoot = getProjectRoot(__dirname)
 
-const CLASH_API_URL = process.env.CLASH_API_URL || 'http://192.168.100.1:9090'
-const CLASH_API_SECRET = process.env.CLASH_API_SECRET || ''
+// Clash API 目标解析顺序: 环境变量 > 面板设置(config/netdiag.json) > 本机常见端口探测
+const COMMON_CLASH_API_PORTS = [9090, 9097, 9091, 9092, 9095, 8788]
+let CLASH_API_URL = (process.env.CLASH_API_URL || '').replace(/\/+$/, '')
+let CLASH_API_SECRET = process.env.CLASH_API_SECRET || ''
+let clashApiSource = CLASH_API_URL ? '环境变量 CLASH_API_URL' : ''
+
+async function probeClashVersion(base, secret) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 1000)
+    try {
+        const res = await fetch(base + '/version', {
+            headers: secret ? { Authorization: `Bearer ${secret}` } : {},
+            signal: controller.signal
+        })
+        clearTimeout(timer)
+        if (!res.ok) return false
+        const body = await res.json().catch(() => null)
+        return Boolean(body && body.version !== undefined)
+    } catch {
+        clearTimeout(timer)
+        return false
+    }
+}
+
+async function resolveClashApiTarget() {
+    if (CLASH_API_URL) return
+    // 面板「网络检测设置」(config/netdiag.json，与 config.json 同卷)
+    const cfgCandidates = [
+        path.join(process.cwd(), 'config', 'netdiag.json'),
+        path.join(process.cwd(), '..', 'config', 'netdiag.json')
+    ]
+    for (const cfgPath of cfgCandidates) {
+        try {
+            const c = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+            if (c.host && c.port) {
+                CLASH_API_URL = `http://${c.host}:${c.port}`
+                CLASH_API_SECRET = c.secret || ''
+                clashApiSource = `面板网络检测设置 (${cfgPath})`
+                return
+            }
+        } catch {
+            // 不存在/非法跳过
+        }
+    }
+    // 常见 Clash API 端口回环探测(含容器内可达宿主的 host.docker.internal)
+    const loopHosts = ['127.0.0.1', 'host.docker.internal']
+    for (const host of loopHosts) {
+        for (const port of COMMON_CLASH_API_PORTS) {
+            const base = `http://${host}:${port}`
+            if (await probeClashVersion(base, CLASH_API_SECRET)) {
+                CLASH_API_URL = base
+                clashApiSource = `端口探测 ${host}:${port}`
+                return
+            }
+        }
+    }
+}
 
 // MSR 微软域全集: 2026-09-30 深夜由真实单账号 run 全程采样 Clash 连接表收集,
 // 叠加静态扫描(src 全部 https 引用)。遥测类只留一个代表(ts1.tc.mm.bing.net)。
@@ -62,13 +118,38 @@ const MS_DOMAINS = [
 const KNOWN_PROXIED_DOMAINS = []
 
 // 连接表里微软域的匹配词(覆盖目标 host 与 sniffHost)
-const MS_MATCHERS = ['bing.com', 'bingapis.com', 'microsoft', 'msn.com', 'msftauth.net', 'live.com', 'windows.net', 'live.net']
+const MS_MATCHERS = [
+    'bing.com',
+    'bingapis.com',
+    'microsoft',
+    'msn.com',
+    'msftauth.net',
+    'live.com',
+    'windows.net',
+    'live.net'
+]
 
 const FAKE_IP_RE = /^198\.1[89]\./
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0'
+const UA =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0'
 
 async function fetchClashConnections() {
+    if (!CLASH_API_URL) return { error: '未发现 CLASH_API_URL，跳过 Clash 路由检查' }
+    // 加固: 探测目标限定回环/私网/内网主机名(本工具只探测本地 Clash 控制器)
+    if (
+        !/^(https:\/\/)?(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\])?(localhost|[\w-]+\.local|[\w-]+\.internal|[\d.]+)?(?::\d+)?\/?$/.test(
+            CLASH_API_URL.replace(/^https?:\/\//, '')
+        )
+    ) {
+        if (
+            !/(localhost|127\.0\.0\.1|192\.168\.|10\.0\.|172\.(1[6-9]|2\d|3[01])\.|host\.docker\.internal)/.test(
+                CLASH_API_URL
+            )
+        ) {
+            return { error: 'Clash API 地址超出内网/回环范围，已拒绝请求' }
+        }
+    }
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 5000)
     try {
@@ -137,10 +218,18 @@ async function probeDomain(domain) {
         })
         clearTimeout(timer)
         // 读一小段就断开, 避免拉全页
-        try { await res.body?.cancel() } catch { /* ignore */ }
+        try {
+            await res.body?.cancel()
+        } catch {
+            /* ignore */
+        }
         result.reachable = true
         result.status = res.status
-        try { result.finalHost = new URL(res.url).hostname } catch { /* ignore */ }
+        try {
+            result.finalHost = new URL(res.url).hostname
+        } catch {
+            /* ignore */
+        }
     } catch (error) {
         // 4xx/5xx 不算不可达(fetch 不会因状态码抛错), 这里只有网络层错误
         result.reachable = false
@@ -151,7 +240,11 @@ async function probeDomain(domain) {
 }
 
 async function main() {
-    log('INFO', `网络诊断开始: ${MS_DOMAINS.length} 个微软域, Clash API ${CLASH_API_URL}`)
+    await resolveClashApiTarget()
+    log(
+        'INFO',
+        `网络诊断开始: ${MS_DOMAINS.length} 个微软域, Clash API ${CLASH_API_URL || '未发现(跳过路由检查)'} [${clashApiSource}]`
+    )
 
     const clashSeen = new Map() // host -> {chains, count, direct}
     let clashError = null
@@ -159,7 +252,10 @@ async function main() {
 
     const sampleClash = async () => {
         const r = await fetchClashConnections()
-        if (r.error) { clashError = r.error; return }
+        if (r.error) {
+            clashError = r.error
+            return
+        }
         clashSamples++
         for (const c of pickMsConnections(r.data?.connections)) {
             const key = c.host
@@ -182,7 +278,10 @@ async function main() {
         const r = await probeDomain(d)
         await sampling
         domains.push(r)
-        log('INFO', `${d}: reachable=${r.reachable} dns=${r.dns ?? '?'}(${r.dnsKind})${r.finalHost && r.finalHost !== d ? ' → ' + r.finalHost : ''}`)
+        log(
+            'INFO',
+            `${d}: reachable=${r.reachable} dns=${r.dns ?? '?'}(${r.dnsKind})${r.finalHost && r.finalHost !== d ? ' → ' + r.finalHost : ''}`
+        )
     }
 
     await new Promise(r => setTimeout(r, 1200))
@@ -198,7 +297,7 @@ async function main() {
     //   direct   = 微软连接全部 DIRECT(经 Clash 但直连)
     //   bypass   = Clash 表无微软连接(流量未经过 Clash, nft/dnsmasq 层直连)
     //   unknown  = Clash API 不可用, 仅有 DNS/可达性参考
-    let verdict = 'unknown'
+    let verdict
     if (clashError && !msConnections.length) {
         verdict = 'unknown'
     } else if (proxied.length) {
@@ -218,10 +317,18 @@ async function main() {
         knownExceptions: knownExceptions.map(c => ({ host: c.host, chains: c.chains })),
         checkedAt: Date.now()
     }
-    const verdictText = { proxied: '发现意外代理流量', direct: '全部直连', bypass: '全部直连(OpenWrt 防火墙直接放行)', unknown: '无法判定(Clash API 不可用)' }
-    log('INFO', `网络诊断结论: ${verdict} = ${verdictText[verdict] || verdict}`
-        + (proxied.length ? ' | 翻墙连接: ' + proxied.map(c => c.host + '@' + c.chains.join('/')).join(', ') : '')
-        + (knownExceptions.length ? ' | 已知例外(节点): ' + knownExceptions.map(c => c.host).join(', ') : ''))
+    const verdictText = {
+        proxied: '发现意外代理流量',
+        direct: '全部直连',
+        bypass: '全部直连(OpenWrt 防火墙直接放行)',
+        unknown: '无法判定(Clash API 不可用)'
+    }
+    log(
+        'INFO',
+        `网络诊断结论: ${verdict} = ${verdictText[verdict] || verdict}` +
+            (proxied.length ? ' | 翻墙连接: ' + proxied.map(c => c.host + '@' + c.chains.join('/')).join(', ') : '') +
+            (knownExceptions.length ? ' | 已知例外(节点): ' + knownExceptions.map(c => c.host).join(', ') : '')
+    )
     console.log('NETDIAG_RESULT ' + JSON.stringify(payload))
 }
 

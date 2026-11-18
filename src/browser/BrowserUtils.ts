@@ -78,7 +78,7 @@ export default class BrowserUtils {
             this.bot.logger.warn(
                 this.bot.isMobile,
                 'DISMISS-ALL-MESSAGES',
-                `Handler error: ${error instanceof Error ? error.message : String(error)}`
+                `处理器错误: ${error instanceof Error ? error.message : String(error)}`
             )
         }
     }
@@ -215,7 +215,7 @@ export default class BrowserUtils {
             const isBadPage = /<body[^>]*\bclass=["'][^"']*\bneterror\b/i.test(html)
 
             if (isBadPage) {
-                this.bot.logger.info(this.bot.isMobile, 'RELOAD-BAD-PAGE', 'Bad page detected, reloading!')
+                this.bot.logger.info(this.bot.isMobile, 'RELOAD-BAD-PAGE', '检测到错误页面，正在重新加载！')
                 try {
                     await page.reload({ waitUntil: 'load' })
                 } catch {
@@ -229,7 +229,7 @@ export default class BrowserUtils {
             this.bot.logger.error(
                 this.bot.isMobile,
                 'RELOAD-BAD-PAGE',
-                `Reload check failed: ${error instanceof Error ? error.message : String(error)}`
+                `重载检查失败: ${error instanceof Error ? error.message : String(error)}`
             )
             return true
         }
@@ -244,7 +244,7 @@ export default class BrowserUtils {
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'CLICK',
-                `Failed for ${selector}: ${error instanceof Error ? error.message : String(error)}`
+                `点击 ${selector} 失败: ${error instanceof Error ? error.message : String(error)}`
             )
             return false
         }
@@ -264,7 +264,7 @@ export default class BrowserUtils {
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'DISABLE-FIDO',
-                    `Modified request body: isFidoSupported set to ${body.isFidoSupported}`
+                    `已修改请求体: isFidoSupported 设为 ${body.isFidoSupported}`
                 )
 
                 await route.continue({
@@ -278,7 +278,7 @@ export default class BrowserUtils {
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'DISABLE-FIDO',
-                    `An error occurred: ${error instanceof Error ? error.message : String(error)}`
+                    `发生错误: ${error instanceof Error ? error.message : String(error)}`
                 )
                 await route.continue()
             }

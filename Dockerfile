@@ -1,4 +1,5 @@
-FROM node:24-bookworm-slim AS builder
+# 国内镜像源加速拉取（m.daocloud.io 代理 Docker Hub）；海外环境可改回 node:24-bookworm-slim
+FROM m.daocloud.io/docker.io/library/node:24-bookworm-slim AS builder
 
 WORKDIR /usr/src/microsoft-rewards-script
 ENV PLAYWRIGHT_BROWSERS_PATH=0
@@ -11,7 +12,7 @@ RUN rm -rf node_modules \
     && npm ci --omit=dev --ignore-scripts \
     && npm cache clean --force
 
-FROM node:24-bookworm-slim AS runtime
+FROM m.daocloud.io/docker.io/library/node:24-bookworm-slim AS runtime
 
 WORKDIR /usr/src/microsoft-rewards-script
 ENV NODE_ENV=production \
@@ -20,8 +21,13 @@ ENV NODE_ENV=production \
     FORCE_HEADLESS=1 \
     NODE_OPTIONS=--disable-warning=ExperimentalWarning
 
+# plus jq (for config generation/patching) and gettext-base (for envsubst).
+# xvfb/x11vnc/novnc/websockify power the dashboard's in-browser manual login
+# (headed browser under a virtual display, viewed through noVNC).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cron tzdata ca-certificates procps util-linux tini \
+    jq gettext-base \
+    xvfb x11vnc novnc websockify \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 COPY --from=builder /usr/src/microsoft-rewards-script/dist ./dist
@@ -37,6 +43,8 @@ COPY --chmod=755 scripts/docker/run_daily.sh ./scripts/docker/run_daily.sh
 COPY --chmod=755 scripts/docker/healthcheck.sh ./scripts/docker/healthcheck.sh
 COPY scripts/lib/ ./scripts/lib/
 COPY scripts/main/ ./scripts/main/
+# Embedded web dashboard (zero-dependency Node; started by entrypoint when DASHBOARD_ENABLED)
+COPY --chmod=644 dashboard/ ./dashboard/
 COPY --chmod=644 scripts/package.json ./scripts/package.json
 COPY --chmod=644 src/crontab.template /etc/cron.d/microsoft-rewards-cron.template
 COPY --chmod=755 scripts/docker/entrypoint.sh /usr/local/bin/entrypoint.sh

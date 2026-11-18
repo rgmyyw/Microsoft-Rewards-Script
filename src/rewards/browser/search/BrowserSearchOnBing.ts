@@ -26,7 +26,7 @@ export class BrowserSearchOnBing extends BaseActivity {
         this.bot.logger.info(
             this.bot.isMobile,
             'SEARCH-ON-BING',
-            `Starting SearchOnBing | offerId=${offerId} | title="${promotion.title}" | currentBalance=${this.oldBalance}`
+            `开始 SearchOnBing | offerId=${offerId} | 标题="${promotion.title}" | 当前余额=${this.oldBalance}`
         )
 
         try {
@@ -61,7 +61,7 @@ export class BrowserSearchOnBing extends BaseActivity {
             this.bot.logger.error(
                 this.bot.isMobile,
                 'SEARCH-ON-BING',
-                `Error in doSearchOnBing | offerId=${offerId} | message=${error instanceof Error ? error.message : String(error)}`
+                `doSearchOnBing 出错 | offerId=${offerId} | 错误=${error instanceof Error ? error.message : String(error)}`
             )
             return activityFailure(error, offerId)
         }

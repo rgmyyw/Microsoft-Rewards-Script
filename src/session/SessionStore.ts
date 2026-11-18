@@ -135,6 +135,16 @@ export function saveFingerprint(
         .run(email, platformOf(isMobile), JSON.stringify(fingerprint), Date.now())
 }
 
+export function clearStorageState(sessionPath: string, email: string, isMobile: boolean): void {
+    getDb(sessionPath)
+        .prepare(
+            `UPDATE sessions
+             SET storage_state = NULL, updated_at = ?
+             WHERE email = ? AND platform = ?`
+        )
+        .run(Date.now(), email, platformOf(isMobile))
+}
+
 export function loadResolvedRegion(sessionPath: string, email: string): string | undefined {
     const row = getDb(sessionPath)
         .prepare('SELECT resolved_region FROM account_metadata WHERE email = ?')

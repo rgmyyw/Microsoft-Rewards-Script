@@ -12,6 +12,11 @@ export const defaultConfig: Config = {
     skipNonPointTasks: true,
     accountDelay: { min: '1min', max: '3min' },
     taskDelay: { min: '15sec', max: '30sec' },
+    failedAccountRetry: {
+        enabled: true,
+        maxPasses: 1,
+        cooldown: { min: '3min', max: '8min' }
+    },
     workers: {
         doDailySet: true,
         doClaimBonusPoints: true,
@@ -39,6 +44,7 @@ export const defaultConfig: Config = {
         clusterSearch: true,
         useAccountLocale: true,
         queryEngines: ['google', 'local', 'wikipedia', 'rss.googleNews'],
+        chinaApi: { appkey: '' },
         searchResultVisitTime: '10sec',
         searchDelay: { min: '30sec', max: '1min' },
         readDelay: { min: '30sec', max: '1min' }

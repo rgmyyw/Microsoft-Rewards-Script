@@ -147,7 +147,7 @@ export class AppPlatformClient {
                 newProgress !== null &&
                 (newProgress > oldProgress || (updated && newProgress !== oldProgress))
             const evidence = [
-                after?.attributes.complete?.trim().toLowerCase() === 'true' && 'complete',
+                after?.attributes.complete?.trim().toLowerCase() === 'true' && '完成',
                 gained !== null && gained > 0 && 'pointprogress',
                 progressed && 'progress'
             ].filter(Boolean)

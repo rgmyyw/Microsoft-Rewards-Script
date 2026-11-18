@@ -48,7 +48,7 @@ export class BingSearchApi {
 
         const ig = this.readIg(searchResponse.data)
         if (!ig) {
-            this.bot.logger.warn(this.bot.isMobile, context, `No IG for "${query}" - SERP not served as expected`)
+            this.bot.logger.warn(this.bot.isMobile, context, `查询 "${query}" 无 IG - SERP 未按预期返回`)
             return parseBingSearchReport(null)
         }
 

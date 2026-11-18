@@ -7,7 +7,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/ohnoon/Microsoft-Rewards-Script/scripts/mac_script.sh</string>
+        <string>/Users/yanghai/Documents/code/Microsoft-Rewards-Script/scripts/mac/mac_script.sh</string>
     </array>
     <key>StartCalendarInterval</key>
     <array>

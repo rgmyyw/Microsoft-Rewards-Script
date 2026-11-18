@@ -1,5 +1,3 @@
-/* global window */
-
 /**
  * Headless login health-check + live balance probe for one account.
  *
@@ -23,11 +21,9 @@ import { fileURLToPath } from 'node:url'
 
 import { FingerprintGenerator } from 'fingerprint-generator'
 import { newInjectedContext } from 'fingerprint-injector'
-import ms from 'ms'
 import { chromium } from 'patchright'
 
 import {
-    buildProxyConfig,
     closeSessionDb,
     ensureSessionSchema,
     findAccountByEmail,
@@ -43,7 +39,8 @@ import {
     parseArgs,
     resolveEmailArgument,
     saveSessionRow
-} from '../utils.js'
+} from '../lib/commandUtils.js'
+import { buildBrowserProxy } from '../lib/proxy.cjs'
 import { isRewardsPage, parsePlatforms, resolveGlobalTimeoutMs } from './manualLogin.js'
 
 const REWARDS_URL = 'https://rewards.bing.com/'
@@ -72,9 +69,10 @@ function normalizeCountry(value) {
 
 function resolveLocale(account, resolvedCountry) {
     const languageTag = new Intl.Locale(account.langCode || 'en').toString()
-    const language = new Intl.Locale(languageTag).language.toLowerCase()
-    const configuredCountry = account.geoLocale.toLowerCase() === 'auto' ? undefined : normalizeCountry(account.geoLocale)
-    const country = configuredCountry ?? normalizeCountry(resolvedCountry) ?? normalizeCountry(new Intl.Locale(languageTag).region)
+    const configuredCountry =
+        account.geoLocale.toLowerCase() === 'auto' ? undefined : normalizeCountry(account.geoLocale)
+    const country =
+        configuredCountry ?? normalizeCountry(resolvedCountry) ?? normalizeCountry(new Intl.Locale(languageTag).region)
     const locale = country ? new Intl.Locale(languageTag, { region: country }).toString() : languageTag
     return { locale, acceptedLocales: [locale] }
 }
@@ -151,7 +149,7 @@ async function readBalance(page) {
             const d = dashboard ?? {}
             const pad2 = n => String(n).padStart(2, '0')
             // 浏览器本地时区可能被指纹注入伪造, 必须用 UTC 系 getter: 北京/UTC/UTC+1 三个候选键
-            const keyFor = (offsetH) => {
+            const keyFor = offsetH => {
                 const dt = new Date(Date.now() + offsetH * 3600e3)
                 return `${pad2(dt.getUTCMonth() + 1)}/${pad2(dt.getUTCDate())}/${dt.getUTCFullYear()}`
             }
@@ -160,12 +158,18 @@ async function readBalance(page) {
             const dsObj = d.dailySetPromotions
             if (dsObj && typeof dsObj === 'object' && !Array.isArray(dsObj)) {
                 for (const k of todayKeys) {
-                    if (Array.isArray(dsObj[k]) && dsObj[k].length) { ds = dsObj[k]; break }
+                    if (Array.isArray(dsObj[k]) && dsObj[k].length) {
+                        ds = dsObj[k]
+                        break
+                    }
                 }
                 if (!ds) {
-                    const cand = Object.keys(dsObj).map(k => ({ k, arr: dsObj[k] })).filter(x => Array.isArray(x.arr) && x.arr.length)
+                    const cand = Object.keys(dsObj)
+                        .map(k => ({ k, arr: dsObj[k] }))
+                        .filter(x => Array.isArray(x.arr) && x.arr.length)
                     cand.sort((a, b) => new Date(a.k).getTime() - new Date(b.k).getTime())
-                    const match = cand.find(x => x.k === todayKeys[0]) || cand.find(x => x.k === todayKeys[1]) || cand[0]
+                    const match =
+                        cand.find(x => x.k === todayKeys[0]) || cand.find(x => x.k === todayKeys[1]) || cand[0]
                     ds = match ? match.arr : null
                 }
             }
@@ -174,27 +178,34 @@ async function readBalance(page) {
             const searchItems = ['pcSearch', 'mobileSearch']
                 .flatMap(k => (Array.isArray(counters?.[k]) ? counters[k] : []))
                 .filter(x => x && (x.pointProgressMax ?? 0) > 0)
-            const cards = (Array.isArray(d.punchCards) ? d.punchCards : [])
-                .flatMap(p => (Array.isArray(p?.childTasks) ? p.childTasks : []))
+            const cards = (Array.isArray(d.punchCards) ? d.punchCards : []).flatMap(p =>
+                Array.isArray(p?.childTasks) ? p.childTasks : []
+            )
             const countDone = (items, byProgress) => {
                 const total = items.length
-                const done = items.filter(x => byProgress
-                    ? ((x.pointProgress ?? 0) >= (x.pointProgressMax ?? 0) && (x.pointProgressMax ?? 0) > 0)
-                    : x.complete === true).length
+                const done = items.filter(x =>
+                    byProgress
+                        ? (x.pointProgress ?? 0) >= (x.pointProgressMax ?? 0) && (x.pointProgressMax ?? 0) > 0
+                        : x.complete === true
+                ).length
                 return { done, total }
             }
             const dailyset = countDone(dsItems, false)
             const search = countDone(searchItems, true)
             const punch = countDone(cards, false)
             const hasAny = dailyset.total + search.total + punch.total > 0
-            const allDone = hasAny &&
+            const allDone =
+                hasAny &&
                 (dailyset.total === 0 || dailyset.done === dailyset.total) &&
                 (search.total === 0 || search.done === search.total) &&
                 (punch.total === 0 || punch.done === punch.total)
             const tasks = {
-                dailysetDone: dailyset.done, dailysetTotal: dailyset.total,
-                searchDone: search.done, searchTotal: search.total,
-                punchDone: punch.done, punchTotal: punch.total,
+                dailysetDone: dailyset.done,
+                dailysetTotal: dailyset.total,
+                searchDone: search.done,
+                searchTotal: search.total,
+                punchDone: punch.done,
+                punchTotal: punch.total,
                 allDone
             }
             return { ok: true, points: points === null ? null : Number(points), tasks }
@@ -218,9 +229,10 @@ async function checkPlatform({ account, config, dbPath, platform }) {
     const fingerprint =
         savesFingerprint && stored.fingerprint ? stored.fingerprint : createFingerprint(isMobile, locale)
     const screen = fingerprint.fingerprint.screen
-    const proxy = buildProxyConfig(account)
+    const proxy = buildBrowserProxy(account.proxy)
     const runningAsRoot = typeof process.getuid === 'function' && process.getuid() === 0
-    const sandboxArgs = process.platform === 'linux' && runningAsRoot ? ['--no-sandbox', '--disable-setuid-sandbox'] : []
+    const sandboxArgs =
+        process.platform === 'linux' && runningAsRoot ? ['--no-sandbox', '--disable-setuid-sandbox'] : []
     const globalTimeout = resolveGlobalTimeoutMs(config.globalTimeout)
 
     const browser = await chromium.launch({
@@ -314,7 +326,13 @@ async function main() {
             platformsResult[platform] = await checkPlatform({ account, config: fileConfig, dbPath, platform })
         } catch (error) {
             log('ERROR', `${platform} check failed: ${error.message}`)
-            platformsResult[platform] = { platform, loggedIn: false, balance: null, reason: 'error', error: error.message }
+            platformsResult[platform] = {
+                platform,
+                loggedIn: false,
+                balance: null,
+                reason: 'error',
+                error: error.message
+            }
         }
     }
 

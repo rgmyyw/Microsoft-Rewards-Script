@@ -20,13 +20,13 @@
 `entrypoint.sh` 在 `API_MODE=true` 且 `DASHBOARD_ENABLED`(默认开)时,以守护子进程拉起 `dashboard/server.js`,
 崩溃 5 秒后自动重启;`healthcheck.sh` 会同时探测 control API 与看板。
 
-| 环境变量 | 默认 | 说明 |
-|---|---|---|
-| `DASHBOARD_ENABLED` | `true` | 是否随容器启动看板 |
-| `DASHBOARD_PORT` | `8300` | 看板监听端口(建议映射到 LAN) |
+| 环境变量             | 默认                           | 说明                                                       |
+| -------------------- | ------------------------------ | ---------------------------------------------------------- |
+| `DASHBOARD_ENABLED`  | `true`                         | 是否随容器启动看板                                         |
+| `DASHBOARD_PORT`     | `8300`                         | 看板监听端口(建议映射到 LAN)                               |
 | `DASHBOARD_DATA_DIR` | `$SCRIPT_DIR/config/dashboard` | push-config.json / state.json 存放目录(config 卷内,持久化) |
-| `API_PORT` | `3010` | 本容器 control API 端口(看板内部访问用) |
-| `API_TOKEN` | - | control API Bearer token(由环境注入) |
+| `API_PORT`           | `3010`                         | 本容器 control API 端口(看板内部访问用)                    |
+| `API_TOKEN`          | -                              | control API Bearer token(由环境注入)                       |
 
 ## 端口与安全
 

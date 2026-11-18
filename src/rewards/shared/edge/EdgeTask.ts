@@ -51,11 +51,7 @@ export class EdgeTask {
 
     async wait(): Promise<void> {
         if (this.running) {
-            this.bot.logger.info(
-                false,
-                'EDGE-BROWSING',
-                'Foreground activities finished; waiting for the background Edge browsing activity'
-            )
+            this.bot.logger.info(false, 'EDGE-BROWSING', '前台活动已完成；正在等待后台 Edge 浏览活动')
         }
         await this.task
         this.task = null
