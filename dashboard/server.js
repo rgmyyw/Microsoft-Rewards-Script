@@ -2802,7 +2802,26 @@ const server = http.createServer(async (req, res) => {
                 ss.searchDelay = { min: String(body.delayMin), max: String(body.delayMax) }
             }
             if (Object.keys(ss).length) patch.searchSettings = ss
-            if (body.workers && typeof body.workers === 'object') patch.workers = body.workers
+            // workers 白名单: 与 v5 ConfigWorkers 对齐, 未知键(v4 遗留)会被 zod strict 拒绝
+            const WORKER_KEYS = [
+                'doDailySet',
+                'doMorePromotions',
+                'doClaimBonusPoints',
+                'doPunchCards',
+                'doAppPromotions',
+                'doDesktopSearch',
+                'doMobileSearch',
+                'doBonusSearches',
+                'doDailyCheckIn',
+                'doReadToEarn',
+                'doActivateSearchPerk',
+                'doVisualSearch'
+            ]
+            if (body.workers && typeof body.workers === 'object') {
+                const w = {}
+                for (const k of WORKER_KEYS) if (typeof body.workers[k] === 'boolean') w[k] = body.workers[k]
+                if (Object.keys(w).length) patch.workers = w
+            }
             if (!Object.keys(patch).length) return json(res, 400, { error: '没有需要保存的变更' })
             return proxyContainerApi('/config', 'PATCH', patch, res)
         }
@@ -3487,7 +3506,7 @@ const HTML = `<!DOCTYPE html>
       <div class="switch-row"><span>移动搜索</span><label class="switch"><input type="checkbox" id="w-doMobileSearch" checked><span class="slider"></span></label></div>
       <div class="switch-row"><span>每日签到</span><label class="switch"><input type="checkbox" id="w-doDailyCheckIn" checked><span class="slider"></span></label></div>
       <div class="switch-row"><span>读赚</span><label class="switch"><input type="checkbox" id="w-doReadToEarn" checked><span class="slider"></span></label></div>
-      <div class="switch-row"><span>特殊活动</span><label class="switch"><input type="checkbox" id="w-doSpecialPromotions" checked><span class="slider"></span></label></div>
+      <!-- v5 无 doSpecialPromotions(v4 遗留, 特殊活动已并入更多活动), 保存会被 zod 拒绝 -->
       <div class="switch-row"><span>更多活动</span><label class="switch"><input type="checkbox" id="w-doMorePromotions" checked><span class="slider"></span></label></div>
       <div class="switch-row"><span>打卡任务</span><label class="switch"><input type="checkbox" id="w-doPunchCards" checked><span class="slider"></span></label></div>
       <div class="switch-row"><span>App 任务</span><label class="switch"><input type="checkbox" id="w-doAppPromotions" checked><span class="slider"></span></label></div>
