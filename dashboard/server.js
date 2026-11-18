@@ -2347,6 +2347,7 @@ const server = http.createServer(async (req, res) => {
                 body = {}
             }
             let payload = {}
+            let planEmails = null // null = 全量
             if (Array.isArray(body.indexes) && body.indexes.length) {
                 const sel = [...new Set(body.indexes.map(Number))].filter(i => Number.isSafeInteger(i) && i >= 1)
                 if (!sel.length) return json(res, 400, { error: 'indexes 无效' })
@@ -2355,13 +2356,25 @@ const server = http.createServer(async (req, res) => {
                 if (!all.length) return json(res, 502, { error: '无法读取账号列表' })
                 const unknown = sel.filter(i => !all.includes(i))
                 if (unknown.length) return json(res, 400, { error: '未知账号序号: ' + unknown.join(',') })
-                if (sel.length >= all.length)
+                if (sel.length >= all.length) {
                     payload = {} // 全选 = 全量
-                else payload = { excludedAccountIndexes: all.filter(i => !sel.includes(i)) }
+                } else {
+                    payload = { excludedAccountIndexes: all.filter(i => !sel.includes(i)) }
+                    const idx2email = {}
+                    for (const a of (accs || {}).accounts || []) idx2email[a.index] = a.email
+                    planEmails = sel.map(i => idx2email[i]).filter(Boolean)
+                }
             } else {
                 const idx = Number(body.accountIndex)
-                if (Number.isSafeInteger(idx) && idx >= 1) payload = { accountIndex: idx }
+                if (Number.isSafeInteger(idx) && idx >= 1) {
+                    payload = { accountIndex: idx }
+                    const accs = await fetchJson('/accounts')
+                    const acc = (((accs || {}).accounts || []) || []).find(a => a.index === idx)
+                    planEmails = acc ? [acc.email] : null
+                }
             }
+            // 记录本轮计划账号集合: 运行条队列只显示本轮参与者(未启动的为排队)
+            state.currentRunPlan = planEmails
             return proxyContainerApi('/start', 'POST', payload, res)
         }
         if (p === '/api/stop' && req.method === 'POST') {
@@ -2532,7 +2545,9 @@ const server = http.createServer(async (req, res) => {
                               success: a.success !== false,
                               gained: a.collected != null ? a.collected : null,
                               error: a.error || null
-                          }))
+                          })),
+                          // 本轮计划账号集合(启动时选定); null = 全量
+                          planEmails: state.currentRunPlan || null
                       }
                     : null,
                 accounts: all,
@@ -3834,9 +3849,11 @@ function renderRunQueue(run) {
       rows.push('<span style="color:#888">⏳ ' + esc(a.email) + '（等待中）</span>');
     }
   }
-  // 控制台尚未上报的账号 = 排队(以账号全集补齐)
-  for (var j = 0; j < accountsCache.length; j++) {
-    var em = accountsCache[j].email;
+  // 控制台尚未上报的账号 = 排队。补齐源: 本轮计划集合(选定账号启动时), 全量启动或无记录时用账号全集
+  var plan = run.planEmails;
+  var pool = plan && plan.length ? plan : accountsCache.map(function (a) { return a.email; });
+  for (var j = 0; j < pool.length; j++) {
+    var em = pool[j];
     if (!seen[em]) rows.push('<span style="color:#9aa">… ' + esc(em) + '（排队）</span>');
   }
   el.innerHTML = rows.join('<br>');
