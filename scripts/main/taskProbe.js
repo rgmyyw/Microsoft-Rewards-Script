@@ -13,6 +13,7 @@ import fs from 'node:fs'
 import {
     closeSessionDb,
     findAccountByEmail,
+    findToolAccount,
     getProjectRoot,
     getSessionDbPath,
     loadAccountsFromEnv,
@@ -213,7 +214,8 @@ async function main() {
     }
 
     const accounts = loadAccountsFromEnv(projectRoot)
-    const account = findAccountByEmail(accounts, email)
+    // 账号查找: env 优先, 面板管理的动态账号(config/accounts.json)兜底
+    const account = findAccountByEmail(accounts, email) || findToolAccount(projectRoot, email)
     if (!account) throw new Error(`No ACCOUNT block found for ${email}`)
 
     const { data: fileConfig } = loadConfig(projectRoot)

@@ -15,6 +15,7 @@ import {
     ensureSessionSchema,
     findUnknownOptions,
     findAccountByEmail,
+    findToolAccount,
     getDirname,
     getProjectRoot,
     getSessionDbPath,
@@ -506,7 +507,8 @@ async function main() {
     const fresh = args.fresh === true
     const { data: fileConfig } = loadConfig(projectRoot)
     const { config, applied: appliedConfigOverrides } = applyManualConfigEnvOverrides(fileConfig)
-    const account = findAccountByEmail(accounts, email)
+    // 账号查找: env 优先, 面板管理的动态账号(config/accounts.json)兜底
+    const account = findAccountByEmail(accounts, email) || findToolAccount(projectRoot, email)
     if (!account) {
         throw new Error(`No ACCOUNT_N_* block found in .env for ${email}`)
     }

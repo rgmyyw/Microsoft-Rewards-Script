@@ -20,3 +20,4 @@ note
 /.zcode/
 .envlogs/
 /logs
+.mimosa/

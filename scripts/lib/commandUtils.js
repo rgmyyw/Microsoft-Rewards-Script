@@ -92,6 +92,35 @@ export function findAccountByEmail(accounts, email) {
     )
 }
 
+// 工具脚本账号查找: env 账号优先, 面板管理的动态账号(config/accounts.json)兜底。
+// manualLogin(VNC)/体检/市场探测等工具在容器内运行时, 动态账号不在 env 中, 必须读文件。
+export function findToolAccount(projectRoot, email) {
+    if (!email || typeof email !== 'string') return null
+    const envAccounts = loadAccountsFromEnv(projectRoot)
+    const envHit = findAccountByEmail(envAccounts, email)
+    if (envHit) return envHit
+    try {
+        const list = JSON.parse(fs.readFileSync(path.join(getProjectRoot(), 'config', 'accounts.json'), 'utf8'))
+        if (!Array.isArray(list)) return null
+        const raw = list.find(
+            x => x && String(x.email || '').toLowerCase() === String(email).toLowerCase() && x.removed !== true
+        )
+        if (!raw) return null
+        return {
+            email: String(raw.email).trim(),
+            password: typeof raw.password === 'string' ? raw.password : '',
+            totpSecret: typeof raw.totpSecret === 'string' ? raw.totpSecret : undefined,
+            recoveryEmail: typeof raw.recoveryEmail === 'string' ? raw.recoveryEmail : '',
+            geoLocale: typeof raw.geoLocale === 'string' ? raw.geoLocale : 'CN',
+            langCode: typeof raw.langCode === 'string' ? raw.langCode : 'zh-CN',
+            proxy: null,
+            saveFingerprint: { mobile: false, desktop: false }
+        }
+    } catch {
+        return null
+    }
+}
+
 export function setupCleanupHandlers(cleanupFn) {
     const cleanup = async () => {
         try {

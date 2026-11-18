@@ -112,9 +112,11 @@ class BrowserManager {
                 !savedFingerprint || this.userAgentManager.matchesFingerprint(savedFingerprint, this.bot.isMobile)
             const reuseFingerprint =
                 savedFingerprint && profileMatches && fingerprintMatchesLocale(savedFingerprint, this.bot.accountLocale)
-
+            // Cookie 恢复与指纹配对解耦: 指纹确实不匹配时丢弃 cookie(沿用上游安全语义);
+            // 未启用指纹持久化的账号(如面板动态账号)没有配对约束, cookie 必须照常恢复
+            const fingerprintMismatch = Boolean(shouldUseFingerprint && savedFingerprint && !reuseFingerprint)
             const restoredStorageState =
-                !fresh && session?.storageState && reuseFingerprint ? session.storageState : null
+                !fresh && session?.storageState && !fingerprintMismatch ? session.storageState : null
 
             if (restoredStorageState && session) {
                 const ageMinutes = Math.max(0, Math.floor((Date.now() - session.updatedAt) / 60000))
@@ -126,11 +128,11 @@ class BrowserManager {
                 )
             } else if (fresh) {
                 this.bot.logger.info(this.bot.isMobile, 'SESSION', 'Starting a fresh sign-in without saved cookies')
-            } else if (session?.storageState) {
+            } else if (session?.storageState && fingerprintMismatch) {
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'SESSION',
-                    `Discarding saved cookies because the paired fingerprint is unavailable or incompatible | shouldUseFingerprint=${shouldUseFingerprint} | savedFingerprintPresent=${!!session.fingerprint} | profileMatch=${profileMatches} | localeMatch=${!!savedFingerprint && fingerprintMatchesLocale(savedFingerprint, this.bot.accountLocale)}`
+                    `Discarding saved cookies because the paired fingerprint is incompatible | profileMatch=${profileMatches} | localeMatch=${!!savedFingerprint && fingerprintMatchesLocale(savedFingerprint, this.bot.accountLocale)}`
                 )
             } else {
                 this.bot.logger.info(this.bot.isMobile, 'SESSION', '未找到已保存的浏览器会话；可能需要登录')
