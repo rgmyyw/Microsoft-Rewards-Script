@@ -1,23 +1,21 @@
 services:
     microsoft-rewards-script:
-        # 本地构建本项目代码（V4-china 国内适配版）。
-        # ghcr.io/thenetsky/... 是原作者 TheNetsky 的官方镜像，跑的是原版代码，
-        # 不含本项目的国内适配（中国热搜 / PushPlus 等）。
-        build: .
-        image: microsoft-rewards-script:china
+        build:
+            context: .
+        image: microsoft-rewards-script:local
         container_name: microsoft-rewards-script
         restart: unless-stopped
+        stop_grace_period: 60s
         volumes:
             - ./config:/usr/src/microsoft-rewards-script/config
+            - ./diagnostics:/usr/src/microsoft-rewards-script/diagnostics
             - ./sessions:/usr/src/microsoft-rewards-script/sessions
-            # Run logs land here (daily files, 90-day retention built into the logger)
-            - ./logs:/usr/src/microsoft-rewards-script/logs
         env_file:
             # Load account credentials from the .env file (ACCOUNT_1_EMAIL, optional ACCOUNT_1_PASSWORD, etc.)
             - path: .env
         environment:
             # ── Scheduler ──────────────────────────────────────
-            TZ: 'Asia/Shanghai' # Set your timezone for proper scheduling
+            TZ: 'America/Toronto'
             NODE_ENV: 'production'
             # CRON_SCHEDULE is the *initial* default. It will run as default unless changed by the API
             # API schedule changes are saved to ./config/schedule.json, delete
@@ -29,29 +27,26 @@ services:
             #MAX_SLEEP_MINUTES: "50"
             #STUCK_PROCESS_TIMEOUT_HOURS: "8"
 
-            # ── API mode ──────────────────────────────────────
-            # Set API_MODE=true to run the API server for additional control options
+            # ── Control API server ──────────────────────────────────
+            # API_MODE starts the Control API; it does not select the Rewards task transport.
+            # Both API_MODE values support CONFIG_REWARDS_MODE=api or browser.
             #API_MODE: 'true'
-            #API_TOKEN: '${API_TOKEN}'             # required for API mode, see example.env
+            #API_TOKEN: '${API_TOKEN}'             # required for API mode, see env.example
             # API write/reveal capabilities are separate opt-ins and are off by default.
             #API_ALLOW_SCHEDULE_WRITE: 'true'
             #API_ALLOW_ENV_OVERRIDES: 'true'
             #API_ALLOW_CONFIG_REVEAL: 'true'
             #API_ALLOW_CONFIG_WRITE: 'true'
 
-            # ── Embedded dashboard (dashboard/server.js) ──────────────────────────────────────
-            # Started automatically in API mode; web UI on :8300 (LAN, no auth - keep it internal).
-            # Its data (push-config/state) persists under ./config/dashboard/.
-            #DASHBOARD_ENABLED: 'true'
-            #DASHBOARD_PORT: '8300'
-
             #  ── Configuration ──────────────────────────────────────
-            # Uncomment to override defaults, a full list of configuration options are in the README.
+            # Uncomment to override config.json settings; see README.md.
             #CONFIG_CLUSTERS: '1'
+            # Rewards task transport: api (direct) or browser (page navigation and DOM clicks).
+            #CONFIG_REWARDS_MODE: 'api'
             #CONFIG_ACCOUNT_DELAY_MIN: '1min'
             #CONFIG_ACCOUNT_DELAY_MAX: '3min'
             # Continue even if Microsoft reports Fraud_UserWarning_BotScore_UX (not recommended).
-            #CONFIG_CONTINTUE_ON_BOT_WARNING: 'false'
+            #CONFIG_CONTINUE_ON_BOT_WARNING: 'false'
             # Block browser image/video/audio requests to reduce transferred media bytes.
             #CONFIG_EXPERIMENTAL_BLOCK_MEDIA: 'false'
             # Report the Edge browsing streak in the background (experimental).
@@ -60,30 +55,10 @@ services:
             #CONFIG_PROXY_IGNORE_CERTIFICATE_ERRORS: 'false'
             #... add additional configuration overrides as needed
 
-        # ── API mode + dashboard port mapping ──────────────────────────────────────
-        # Uncomment when API_MODE=true. 3010 should stay loopback-only (token-bearing API);
-        # 8300 is the embedded dashboard web UI (LAN, no auth).
-            # ── 国内特性（V4-china）──────────────────────────────────
-            # 查询源：中国热搜(gmya.net) + 本地词兜底；国内推荐，无需代理
-            #CONFIG_SEARCH_QUERY_ENGINES: 'china,local'
-            # gmya.net appkey，填入解除免费档限流（留空走免费档，有频率限制）
-            #CONFIG_CHINA_API_APPKEY: ''
-            # PushPlus 微信推送（国内推荐，无需翻墙）：
-            #CONFIG_PUSHPLUS_ENABLED: 'true'
-            #CONFIG_PUSHPLUS_TOKEN: 'your_pushplus_token'
-            #CONFIG_PUSHPLUS_TITLE: 'Microsoft-Rewards-Script'
-            #CONFIG_PUSHPLUS_TEMPLATE: 'txt'        # txt / html / markdown
-            #CONFIG_PUSHPLUS_CHANNEL: ''             # 默认微信；可选其他 channel
-            # 微信 ClawBot 推送（官方 iLink 直连，免费；需容器内完成一次扫码，
-            # 建议配合 API_MODE/tty 使用，或本地登录后把 clawbot-auth.json 挂载进容器）：
-            #CONFIG_CLAWBOT_ENABLED: 'true'
-            #CONFIG_CLAWBOT_AUTHFILE: ''             # 凭证路径，默认项目根 clawbot-auth.json
-
-        # ── API mode port mapping ──────────────────────────────────────
+        # ── Control API port mapping ──────────────────────────────
         # Uncomment when API_MODE=true
         #ports:
         #    - '127.0.0.1:3010:3010'
-        #    - '8300:8300'
 
         healthcheck:
             test: ['CMD-SHELL', 'scripts/docker/healthcheck.sh']
