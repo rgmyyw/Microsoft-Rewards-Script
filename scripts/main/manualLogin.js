@@ -401,7 +401,10 @@ async function runPlatform({ account, config, dbPath, platform, fresh }) {
     const fingerprint = canReuseFingerprint
         ? stored.fingerprint
         : createFingerprint(isMobile, locale, fingerprintOperatingSystem())
-    if (!canReuseFingerprint) stored.storageState = null
+    // Cookie 恢复与指纹配对解耦(与 BrowserManager 同语义): 仅当已启用指纹持久化
+    // 且保存的指纹确实不兼容时才丢弃 cookie; 其余情况(含未启用持久化)都复用已登录状态,
+    // 已登录账号重开手动登录会直接跳过登录环节
+    if (savesFingerprint && stored.fingerprint && !canReuseFingerprint) stored.storageState = null
     const screen = fingerprint.fingerprint.screen
     const proxy = buildBrowserProxy(account.proxy)
 
@@ -440,9 +443,30 @@ async function runPlatform({ account, config, dbPath, platform, fresh }) {
     })
 
     let interrupted = false
+    let liveContext = null
+    let livePage = null
+    // 中断(VNC 断开/面板停止)时: 若当前平台已登录(处于 Rewards 页), 仍保存会话,
+    // 避免人工登录成果因断连丢失; 未登录状态保持上游语义(不保存半认证会话)
     const stop = async signal => {
         if (interrupted) return
         interrupted = true
+        try {
+            if (liveContext && livePage && isRewardsPage(livePage.url())) {
+                const storageState = createSessionState(await liveContext.cookies())
+                if (storageState.cookies?.length) {
+                    saveManualSession(dbPath, account.email, platform, storageState, fingerprint, savesFingerprint)
+                    interruptedAfterSave = true
+                    log(
+                        'SUCCESS',
+                        `${signal} received; detected signed-in Rewards page, session saved | cookies=${storageState.cookies.length}`
+                    )
+                    await browser.close().catch(() => {})
+                    return // 已保存, 以退出码 0 结束(面板按成功处理)
+                }
+            }
+        } catch {
+            // 保存探测失败则回退到不保存
+        }
         process.exitCode = signal === 'SIGINT' ? 130 : 143
         log('WARN', `${signal} received; closing without saving an incomplete login`)
         await browser.close().catch(() => {})
@@ -463,6 +487,7 @@ async function runPlatform({ account, config, dbPath, platform, fresh }) {
             permissions: [],
             ignoreHTTPSErrors: ignoreCertificateErrors,
             ...(stored.storageState ? { storageState: stored.storageState } : {}),
+
             ...(isMobile
                 ? {
                       isMobile: true,
@@ -474,6 +499,7 @@ async function runPlatform({ account, config, dbPath, platform, fresh }) {
                 : {})
         })
         context.setDefaultTimeout(globalTimeout)
+        liveContext = context
 
         if (proxy) {
             await context.addInitScript(() => {
@@ -484,6 +510,7 @@ async function runPlatform({ account, config, dbPath, platform, fresh }) {
         }
 
         const page = await context.newPage()
+        livePage = page
         await page.goto(REWARDS_LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: globalTimeout }).catch(error => {
             log('WARN', `Initial Rewards navigation did not finish cleanly: ${error.message}`)
         })
@@ -580,9 +607,16 @@ async function main() {
     log('SUCCESS', `Manual login completed for ${account.email}`)
 }
 
+// 中断时已保存登录态的标记: 让主流程以干净退出收尾, 不报 ERROR
+let interruptedAfterSave = false
+
 const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 if (isDirectRun) {
     main().catch(error => {
+        if (interruptedAfterSave) {
+            log('INFO', 'Manual login interrupted; the signed-in session was saved before exit')
+            return
+        }
         if (process.exitCode === 130 || process.exitCode === 143) {
             log('WARN', 'Manual login cancelled; existing saved sessions were kept')
         } else {
