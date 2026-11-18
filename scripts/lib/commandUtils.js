@@ -113,7 +113,8 @@ export function findToolAccount(projectRoot, email) {
             recoveryEmail: typeof raw.recoveryEmail === 'string' ? raw.recoveryEmail : '',
             geoLocale: typeof raw.geoLocale === 'string' ? raw.geoLocale : 'CN',
             langCode: typeof raw.langCode === 'string' ? raw.langCode : 'zh-CN',
-            proxy: null,
+            // v5 账号形态要求 proxy 为对象(account.proxy.url 会被直接访问)
+            proxy: { proxyHttp: false, url: '', port: 0, username: '', password: '' },
             saveFingerprint: { mobile: false, desktop: false }
         }
     } catch {

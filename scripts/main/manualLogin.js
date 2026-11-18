@@ -79,7 +79,7 @@ saved and the browser closes. Failed or cancelled logins keep saved sessions.
 
 const failUsage = message => exitWithUsage(message, printHelp, log)
 
-function parsePlatforms(value) {
+export function parsePlatforms(value) {
     if (value === undefined) return ['mobile']
     if (typeof value !== 'string' || !value.trim()) {
         throw new Error('--platform requires mobile, desktop, or both after it')
@@ -92,7 +92,7 @@ function parsePlatforms(value) {
     throw new Error('--platform must be mobile, desktop, or both')
 }
 
-function isRewardsPage(rawUrl) {
+export function isRewardsPage(rawUrl) {
     try {
         const url = new URL(rawUrl)
         const pathname = url.pathname.replace(/\/+$/, '') || '/'
@@ -134,7 +134,7 @@ function applyManualConfigEnvOverrides(rawConfig, env = process.env) {
     return { config, applied }
 }
 
-function resolveGlobalTimeoutMs(value) {
+export function resolveGlobalTimeoutMs(value) {
     const timeout = typeof value === 'number' ? value : ms(String(value))
     if (!Number.isFinite(timeout) || timeout <= 0 || timeout > 2147483647) {
         throw new Error(`config.globalTimeout must be a positive duration of at most 2147483647ms, got '${value}'`)
@@ -364,7 +364,7 @@ async function runPlatform({ account, config, dbPath, platform, fresh }) {
     const screen = fingerprint.fingerprint.screen
     const proxy = buildBrowserProxy(account.proxy)
 
-    if (account.proxy.url && !proxy) {
+    if (account.proxy && account.proxy.url && !proxy) {
         throw new Error('Account proxy is configured but invalid (needs proxy URL and port)')
     }
 
