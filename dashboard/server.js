@@ -472,8 +472,27 @@ function recordEntry(entry) {
             a.lastStatus = 'running'
             a.lastRunTs = Date.now()
             a.lastError = null
-            if (state.currentRun) state.currentRun.cur = { email, startedAt: Date.now() }
+            if (state.currentRun) state.currentRun.cur = { email, startedAt: Date.now(), balance: null, initial: null, activity: null, activityTs: null }
             saveState()
+        }
+    } else if (title === 'ACCOUNT-BALANCE' || title === 'ACCOUNT-INFO') {
+        // 运行中账号的实时余额/初始积分(供运行卡片展示"本号已获得")
+        const cur = state.currentRun && state.currentRun.cur
+        if (cur) {
+            const bal = extractField(message, /(?:currentBalance|现余额)=(\d+)/)
+            const init = extractField(message, /(?:initialPoints|初始积分)=(\d+)/)
+            if (bal) cur.balance = parseInt(bal, 10)
+            if (init && cur.initial == null) cur.initial = parseInt(init, 10)
+        }
+    } else if (title === 'ACTIVITY-DETAIL' || title === 'ACTIVITY-RESULT' || title === 'TASK-DELAY') {
+        // 运行中账号的当前任务(供运行卡片展示任务名/进行时长)
+        const cur = state.currentRun && state.currentRun.cur
+        if (cur) {
+            const act = extractField(message, /(?:^|\|\s*)activity=(\S+)/) || extractField(message, /^([\w-]+) \|/)
+            if (act && act !== 'account' && act.length < 40) {
+                cur.activity = act
+                cur.activityTs = Date.now()
+            }
         }
     } else if (title === 'RUN-START') {
         // 收编上一轮遗留的"已得未入账"部分(账号中途失败时, partial 里还留着本次已得积分)
@@ -2641,7 +2660,14 @@ const server = http.createServer(async (req, res) => {
                               error: a.error || null
                           })),
                           // 本轮计划账号集合(启动时选定); null = 全量
-                          planEmails: state.currentRunPlan || null
+                          planEmails: state.currentRunPlan || null,
+                          // 当前账号实时详情(运行卡片)
+                          curStartedAt: state.currentRun && state.currentRun.cur ? state.currentRun.cur.startedAt : null,
+                          curBalance: state.currentRun && state.currentRun.cur ? state.currentRun.cur.balance : null,
+                          curInitial: state.currentRun && state.currentRun.cur ? state.currentRun.cur.initial : null,
+                          curActivity: state.currentRun && state.currentRun.cur ? state.currentRun.cur.activity : null,
+                          curActivityTs:
+                              state.currentRun && state.currentRun.cur ? state.currentRun.cur.activityTs : null
                       }
                     : null,
                 accounts: all,
@@ -3916,11 +3942,19 @@ function renderRunStrip(run, d, now) {
     document.title = 'MS-Rewards 积分看板';
   }
   $('rsMeta').textContent = bits.join(' · ');
-  renderRunQueue(run);
+  renderRunQueue(run, d);
 }
 
-// ---- 运行账号池(常显): 事实状态 + 待执行池(可移除/追加, 执行顺序随机) ----
+// ---- 运行卡片(常显): 正在跑详情 / 待执行池(可移除) / 可追加账号芯片 / 已完成 ----
 var runPoolCache = { skipEmails: [], addEmails: [] };
+var ACT_ZH = {
+  search: '搜索', punchcard: '打卡任务', 'punchcard-child': '打卡子任务', dailyset: '每日任务',
+  'daily-set': '每日任务', 'more-promotions': '更多活动', 'visual-search': '视觉搜索',
+  'read-to-earn': '读赚', 'daily-check-in': '每日签到', 'bonus-searches': '额外搜索',
+  'url-reward': '网页奖励', 'claim-bonus-points': '领取奖励', 'activate-search-perk': '搜索加成',
+  'streak-protection': '连击保护', 'app-promotions': 'App 任务', 'edge-browsing': 'Edge 浏览'
+};
+function actZh(a) { return ACT_ZH[a] || a || '-'; }
 function poolSkip(email) {
   if (!confirm('将 ' + email + ' 从本轮待执行池移除？')) return;
   apiFetch(API.runPool, { method: 'POST', body: { skipEmail: email } }).then(function () {
@@ -3929,69 +3963,94 @@ function poolSkip(email) {
     toast('已移除: ' + email);
   }).catch(function (e) { toast('移除失败: ' + e.message, false); });
 }
-function poolAdd() {
-  var sel = $('poolAddSel');
-  var email = sel && sel.value;
-  if (!email) return;
+function poolAdd(email, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '已追加'; }
   apiFetch(API.runPool, { method: 'POST', body: { addEmails: [email] } }).then(function () {
     runPoolCache.addEmails = (runPoolCache.addEmails || []).concat([email]);
     runPoolCache.skipEmails = (runPoolCache.skipEmails || []).filter(function (s) { return s !== email; });
     renderRunQueue(runCache);
     toast('已追加: ' + email);
-  }).catch(function (e) { toast('追加失败: ' + e.message, false); });
+  }).catch(function (e) { if (btn) { btn.disabled = false; btn.textContent = '+'; } toast('追加失败: ' + e.message, false); });
 }
-function renderRunQueue(run) {
+function renderRunQueue(run, d) {
   var el = $('runQueue');
   if (!run || run.running !== true) { el.innerHTML = ''; return; }
-  var rows = [];
+  var now = Date.now();
+  var html = '';
   var seen = {};
   var q = run.queue || [];
-  var pending = [];
+  var doneRows = [], pendRows = [];
+  var curEmail = run.currentAccount;
+  // ---- 正在跑卡片 ----
+  if (curEmail) {
+    var mins = run.curStartedAt ? Math.max(0, Math.round((now - run.curStartedAt) / 60000)) : null;
+    var gained = run.curBalance != null && run.curInitial != null ? run.curBalance - run.curInitial : null;
+    var actLine = '';
+    if (run.curActivity) {
+      var actMin = run.curActivityTs ? Math.max(0, Math.round((now - run.curActivityTs) / 60000)) : 0;
+      actLine = '<div style="color:#666;font-size:12px;margin-top:2px">当前任务: ' + esc(actZh(run.curActivity)) +
+        (actMin > 0 ? '（已 ' + actMin + ' 分钟）' : '') + '</div>';
+    }
+    var etaLine = '';
+    if (d && d.eta && d.eta.meanMin && mins != null) {
+      var remain = Math.max(1, d.eta.meanMin - mins);
+      etaLine = '<div style="color:#666;font-size:12px;margin-top:2px">预计剩余 ~' + remain + ' 分钟（均值 ' + d.eta.meanMin + ' 分/账号）</div>';
+    }
+    html += '<div style="border:1px solid #d9ead9;background:#f4fbf6;border-radius:8px;padding:8px 10px;margin-bottom:8px">' +
+      '<div style="font-weight:600;color:#0a7d4e">▶ ' + esc(curEmail) +
+      ' <span style="font-weight:400;color:#888;font-size:12px">正在跑' + (mins != null ? ' · 已 ' + mins + ' 分钟' : '') + '</span></div>' +
+      actLine + etaLine +
+      '<div style="margin-top:2px">本次已获得: <b style="color:#0a7d4e">+' + (gained != null ? fmtNum(gained) : '-') + '</b> 分' +
+      (run.curBalance != null ? ' · 余额 ' + fmtNum(run.curBalance) : '') + '</div></div>';
+  }
+  // ---- 分类: 已完成 / 待执行 ----
   for (var i = 0; i < q.length; i++) {
     var a = q[i];
     seen[a.email] = true;
-    if (!a.done && run.currentAccount === a.email) {
-      rows.push('<span style="color:#0a7d4e;font-weight:600">▶ ' + esc(a.email) + '（正在跑）</span>');
-    } else if (a.done && a.success) {
-      rows.push('<span style="color:#888">✓ ' + esc(a.email) + (a.gained != null ? ' · +' + fmtNum(a.gained) + ' 分' : '') + '</span>');
+    if (a.done && a.success) {
+      doneRows.push('<span style="color:#888">✓ ' + esc(a.email) + (a.gained != null ? ' <b style="color:#0a7d4e">+' + fmtNum(a.gained) + '</b>' : '') + '</span>');
     } else if (a.done) {
-      rows.push('<span style="color:#c0392b">✗ ' + esc(a.email) + (a.error ? ' · ' + esc(String(a.error).slice(0, 80)) : '') + '</span>');
+      doneRows.push('<span style="color:#c0392b">✗ ' + esc(a.email) + (a.error ? ' · ' + esc(String(a.error).slice(0, 60)) : '') + '</span>');
     }
   }
-  // 未上报的账号 = 待执行池(执行顺序随机, 非固定队列); 可移除
-  var poolSkipped = runPoolCache.skipEmails || [];
+  var skipped = runPoolCache.skipEmails || [];
   var plan = run.planEmails;
   var pool = plan && plan.length ? plan : accountsCache.map(function (a) { return a.email; });
-  var candidates = [];
   for (var j = 0; j < pool.length; j++) {
     var em = pool[j];
     if (seen[em]) continue;
-    if (poolSkipped.indexOf(em) >= 0) {
-      rows.push('<span style="color:#bbb;text-decoration:line-through">✕ ' + esc(em) + '（已从本轮移除）</span>');
+    if (skipped.indexOf(em) >= 0) {
+      pendRows.push('<span style="color:#bbb;text-decoration:line-through">' + esc(em) + '（已移除）</span>');
       continue;
     }
-    pending.push(em);
-    candidates.push(em);
+    pendRows.push('<span>' + esc(em) +
+      ' <button style="font-size:11px;padding:0 6px;cursor:pointer;border:1px solid #ddd;border-radius:4px;background:#fff;color:#c0392b" onclick="poolSkip(&quot;' + esc(em) + '&quot;)">移除</button></span>');
   }
-  for (var k = 0; k < pending.length; k++) {
-    rows.push('<span style="color:#9aa">· ' + esc(pending[k]) +
-      ' <button style="font-size:11px;padding:0 6px;margin-left:4px;cursor:pointer;border:1px solid #ddd;border-radius:4px;background:#fff;color:#c0392b" onclick="poolSkip(&quot;' + esc(pending[k]) + '&quot;)">移除</button></span>');
+  // ---- 待执行池 ----
+  if (pendRows.length) {
+    html += '<div style="margin-bottom:8px"><div style="color:#666;font-size:12px;margin-bottom:3px">⏳ 待执行池（' + pendRows.length + '）</div>' +
+      pendRows.join('<br>') + '</div>';
   }
-  // 追加账号: 全集里不在本轮的账号
+  // ---- 追加: 不在本轮的账号, 芯片点击即追加 ----
   var inBatch = {};
   for (var m = 0; m < pool.length; m++) inBatch[pool[m]] = true;
+  var added = runPoolCache.addEmails || [];
   var addable = [];
   for (var n = 0; n < accountsCache.length; n++) {
     var em2 = accountsCache[n].email;
-    if (!inBatch[em2] && (runPoolCache.addEmails || []).indexOf(em2) < 0) addable.push(em2);
+    if (!inBatch[em2] && added.indexOf(em2) < 0) addable.push(em2);
   }
   if (addable.length) {
-    var opts = addable.map(function (e2) { return '<option value="' + esc(e2) + '">' + esc(e2) + '</option>'; }).join('');
-    rows.push('<span style="color:#9aa">+ <select id="poolAddSel" style="font-size:12px;max-width:200px">' + opts + '</select>' +
-      ' <button style="font-size:11px;padding:0 6px;cursor:pointer;border:1px solid #ddd;border-radius:4px;background:#fff;color:#0a7d4e" onclick="poolAdd()">追加到本轮</button></span>');
+    var chips = addable.map(function (e2) {
+      return '<button style="font-size:12px;padding:1px 8px;margin:1px 2px;cursor:pointer;border:1px solid #cde;border-radius:10px;background:#f4f9ff;color:#1a5fb4" onclick="poolAdd(&quot;' + esc(e2) + '&quot;, this)">+ ' + esc(e2) + '</button>';
+    }).join(' ');
+    html += '<div style="margin-bottom:8px"><div style="color:#666;font-size:12px;margin-bottom:3px">➕ 追加到本轮（点击即加入）</div>' + chips + '</div>';
   }
-  rows.unshift('<span style="color:#999;font-size:11.5px">执行顺序随机；待执行池中的账号可移除，也可追加账号到本轮</span>');
-  el.innerHTML = rows.join('<br>');
+  // ---- 已完成 ----
+  if (doneRows.length) {
+    html += '<div><div style="color:#666;font-size:12px;margin-bottom:3px">✅ 已完成（' + doneRows.length + '）</div>' + doneRows.join('<br>') + '</div>';
+  }
+  el.innerHTML = html;
   refreshRunPool();
 }
 function refreshRunPool() {
