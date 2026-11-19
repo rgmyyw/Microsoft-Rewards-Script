@@ -3800,6 +3800,10 @@ function apiFetch(url, opts, timeoutMs) {
   var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
   var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, timeoutMs || 6000);
   if (ctrl) opts.signal = ctrl.signal;
+  if (opts.body && typeof opts.body === 'object') {
+    opts.body = JSON.stringify(opts.body);
+    opts.headers = Object.assign({}, opts.headers, { 'Content-Type': 'application/json' });
+  }
   return fetch(url, opts).then(function (r) {
     clearTimeout(timer);
     if (!r.ok) throw new Error('HTTP ' + r.status);
