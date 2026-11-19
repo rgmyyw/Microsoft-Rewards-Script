@@ -3971,7 +3971,7 @@ function renderRunQueue(run) {
   }
   for (var k = 0; k < pending.length; k++) {
     rows.push('<span style="color:#9aa">· ' + esc(pending[k]) +
-      ' <button style="font-size:11px;padding:0 6px;margin-left:4px;cursor:pointer;border:1px solid #ddd;border-radius:4px;background:#fff;color:#c0392b" onclick="poolSkip(\'' + esc(pending[k]) + '\')">移除</button></span>');
+      ' <button style="font-size:11px;padding:0 6px;margin-left:4px;cursor:pointer;border:1px solid #ddd;border-radius:4px;background:#fff;color:#c0392b" onclick="poolSkip(&quot;' + esc(pending[k]) + '&quot;)">移除</button></span>');
   }
   // 追加账号: 全集里不在本轮的账号
   var inBatch = {};
