@@ -331,6 +331,10 @@ function cardMd(icon, heading, fields) {
 }
 
 function pushForEntry(rawEntry) {
+    // SSE 带 replay=200 重连: 重启/断线会把旧事件当新事件再推一遍(曾把 8 小时前的
+    // 旧错误推给用户)。只推送本进程启动之后产生的事件; replay 仅用于重建状态
+    const ts = Date.parse(rawEntry && rawEntry.ts)
+    if (!isNaN(ts) && ts < BOOT_TS - 5000) return
     const entry = normalizeEntry(rawEntry)
     const ev = pushConfig.events || {}
     const title = (entry.title || '').toUpperCase()
@@ -570,6 +574,7 @@ function recordEntry(entry) {
 }
 
 // ============ SSE 客户端(订阅容器 API /events) ============
+const BOOT_TS = Date.now()
 function handleFrame(frame) {
     const lines = frame.split('\n')
     let event = null
