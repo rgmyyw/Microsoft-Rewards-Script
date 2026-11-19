@@ -479,7 +479,10 @@ function recordEntry(entry) {
         a.failStreak = 0
         if (state.currentRun) {
             state.currentRun.accounts.push({ email, gained, balance })
-            state.currentRun.collected += gained
+            // 按 email 去重取最新一次得分(兜底补跑重跑同一账号时不叠加两轮)
+            const latest = {}
+            for (const rec of state.currentRun.accounts) latest[rec.email] = rec.gained
+            state.currentRun.collected = Object.values(latest).reduce((s, v) => s + (v || 0), 0)
         }
         saveState()
         // 该账号跑完后 90s 用轻量探针实测任务/余额(不开浏览器, 运行中安全)
@@ -494,6 +497,9 @@ function recordEntry(entry) {
             a.lastRunTs = Date.now()
             a.lastError = null
             if (state.currentRun) state.currentRun.cur = { email, startedAt: Date.now(), balance: null, initial: null, activity: null, activityTs: null }
+    } else if (title === 'RETRY-PASS' || /补跑/.test(message)) {
+        // 兜底补跑阶段标记(失败账号冷却后自动重试一轮)
+        if (state.currentRun) state.currentRun.retryPhase = true
             saveState()
         }
     } else if (title === 'ACCOUNT-BALANCE' || title === 'ACCOUNT-INFO') {
@@ -2669,7 +2675,7 @@ const server = http.createServer(async (req, res) => {
                           accountsTotal: points.accountsTotal,
                           // 运行进度: 本轮已收到完成事件的账号数(SSE 断连时回退 /points 的 done 计数)
                           doneCount: state.currentRun
-                              ? state.currentRun.accounts.length
+                              ? new Set(state.currentRun.accounts.map(a => a.email)).size
                               : liveAccounts.filter(x => x.done).length,
                           totalCount: points.accountsTotal || liveAccounts.length,
                           // 账号队列: 已见账号的实时状态(完成/失败含得分), 未见的即为排队
@@ -2688,7 +2694,8 @@ const server = http.createServer(async (req, res) => {
                           curInitial: state.currentRun && state.currentRun.cur ? state.currentRun.cur.initial : null,
                           curActivity: state.currentRun && state.currentRun.cur ? state.currentRun.cur.activity : null,
                           curActivityTs:
-                              state.currentRun && state.currentRun.cur ? state.currentRun.cur.activityTs : null
+                              state.currentRun && state.currentRun.cur ? state.currentRun.cur.activityTs : null,
+                          retryPhase: !!(state.currentRun && state.currentRun.retryPhase)
                       }
                     : null,
                 accounts: all,
@@ -3942,7 +3949,7 @@ function renderRunStrip(run, d, now) {
       $('rsBar').style.display = '';
       $('rsBar').className = 'pbar running';
       $('rsFill').style.width = pct + '%';
-      $('rsTitle').textContent = '▶ 运行中 ' + done + '/' + total + ' · 本轮合计 +' + fmtNum(run.collected);
+      $('rsTitle').textContent = (run.retryPhase ? '▶ 兜底补跑中 ' : '▶ 运行中 ') + done + '/' + total + ' · 本轮合计 +' + fmtNum(run.collected);
     } else {
       $('rsBar').style.display = 'none';
     }
@@ -3998,7 +4005,7 @@ function renderRunQueue(run, d) {
   var html = '';
   var seen = {};
   var q = run.queue || [];
-  var doneRows = [], pendRows = [];
+  var doneRows = [], failRows = [], pendRows = [];
   var curEmail = run.currentAccount;
   // ---- 正在跑卡片 ----
   if (curEmail) {
@@ -4029,7 +4036,7 @@ function renderRunQueue(run, d) {
     if (a.done && a.success) {
       doneRows.push('<span style="color:#888">✓ ' + esc(a.email) + (a.gained != null ? ' <b style="color:#0a7d4e">+' + fmtNum(a.gained) + '</b>' : '') + '</span>');
     } else if (a.done) {
-      doneRows.push('<span style="color:#c0392b">✗ ' + esc(a.email) + (a.error ? ' · ' + esc(String(a.error).slice(0, 60)) : '') + '</span>');
+      failRows.push('<span style="color:#c0392b">✗ ' + esc(a.email) + (a.error ? ' · ' + esc(String(a.error).slice(0, 50)) : '') + '</span>');
     }
   }
   var skipped = runPoolCache.skipEmails || [];
@@ -4065,7 +4072,10 @@ function renderRunQueue(run, d) {
     }).join(' ');
     html += '<div style="margin-bottom:8px"><div style="color:#666;font-size:12px;margin-bottom:3px">➕ 追加到本轮（点击即加入）</div>' + chips + '</div>';
   }
-  // ---- 已完成 ----
+  // ---- 失败/异常 与 已完成 分区 ----
+  if (failRows.length) {
+    html += '<div style="margin-bottom:8px"><div style="color:#c0392b;font-size:12px;margin-bottom:3px">❌ 异常（' + failRows.length + '，可能已进入兜底补跑）</div>' + failRows.join('<br>') + '</div>';
+  }
   if (doneRows.length) {
     html += '<div><div style="color:#666;font-size:12px;margin-bottom:3px">✅ 已完成（' + doneRows.length + '）</div>' + doneRows.join('<br>') + '</div>';
   }
