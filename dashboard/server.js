@@ -4034,6 +4034,8 @@ function renderRunQueue(run, d) {
   for (var i = 0; i < q.length; i++) {
     var a = q[i];
     seen[a.email] = true;
+    // 正在跑的账号(含兜底补跑重跑)只由上方卡片表达, 不再重复进入下方分区
+    if (curEmail === a.email) continue;
     if (a.done && a.success) {
       doneRows.push('<span style="color:#888">✓ ' + esc(a.email) + (a.gained != null ? ' <b style="color:#0a7d4e">+' + fmtNum(a.gained) + '</b>' : '') + '</span>');
     } else if (a.done && a.status === 'partial') {
