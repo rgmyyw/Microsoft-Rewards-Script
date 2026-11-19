@@ -72,3 +72,12 @@ export const URLs = {
 } as const
 
 export const REWARDS_BASE_URL = URLs.rewards.origin
+
+/**
+ * 是否 Bing 搜索域(含国区 cn.bing.com 等地区子域):
+ * 国内网络访问 www.bing.com 会被重定向到 cn.bing.com, 严格的 origin 相等判定会导致
+ * 搜索提交后的 waitForURL 永不匹配而超时(实测导航已成功跳到 cn.bing.com/search)
+ */
+export function isBingSearchHost(url: URL): boolean {
+    return url.hostname === 'bing.com' || url.hostname.endsWith('.bing.com')
+}
