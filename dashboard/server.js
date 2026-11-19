@@ -3456,7 +3456,8 @@ const HTML = `<!DOCTYPE html>
       <span class="rs-meta" id="rsMeta"></span>
     </div>
     <div class="pbar" id="rsBar" style="display:none"><div class="fill" id="rsFill" style="width:0%"></div></div>
-    <div id="runQueue" style="margin-top:8px;font-size:12.5px;line-height:1.9"></div>
+    <div id="runCard" style="display:none;margin-top:8px"></div>
+    <div id="runPool" style="margin-top:8px;font-size:12.5px;line-height:1.9"></div>
   </section>
 
   <section class="toolbar">
@@ -4000,36 +4001,43 @@ function poolAdd(email, btn) {
   }).catch(function (e) { if (btn) { btn.disabled = false; btn.textContent = '+'; } toast('追加失败: ' + e.message, false); });
 }
 function renderRunQueue(run, d) {
-  var el = $('runQueue');
-  if (!run || run.running !== true) { el.innerHTML = ''; return; }
+  renderRunCard(run, d);
+  renderRunPool(run);
+}
+function renderRunCard(run, d) {
+  var el = $('runCard');
+  if (!run || run.running !== true || !run.currentAccount) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = '';
   var now = Date.now();
+  var curEmail = run.currentAccount;
+  var mins = run.curStartedAt ? Math.max(0, Math.round((now - run.curStartedAt) / 60000)) : null;
+  var gained = run.curBalance != null && run.curInitial != null ? run.curBalance - run.curInitial : null;
+  var actLine = '';
+  if (run.curActivity) {
+    var actMin = run.curActivityTs ? Math.max(0, Math.round((now - run.curActivityTs) / 60000)) : 0;
+    actLine = '<div style="color:#666;font-size:12px;margin-top:2px">🔨 当前任务: ' + esc(actZh(run.curActivity)) +
+      (actMin > 0 ? '（已 ' + actMin + ' 分钟）' : '') + '</div>';
+  }
+  var etaLine = '';
+  if (d && d.eta && d.eta.meanMin && mins != null) {
+    var remain = Math.max(1, d.eta.meanMin - mins);
+    etaLine = '<div style="color:#666;font-size:12px;margin-top:2px">⏳ 预计剩余 ~' + remain + ' 分钟（均值 ' + d.eta.meanMin + ' 分/账号）</div>';
+  }
+  el.innerHTML = '<div style="border:1px solid #d9ead9;background:#f4fbf6;border-radius:8px;padding:8px 10px">' +
+    '<div style="font-weight:600;color:#0a7d4e">▶ ' + esc(curEmail) +
+    ' <span style="font-weight:400;color:#888;font-size:12px">正在跑' + (mins != null ? ' · 已 ' + mins + ' 分钟' : '') + '</span></div>' +
+    actLine + etaLine +
+    '<div style="margin-top:2px">💰 本次已获得: <b style="color:#0a7d4e">+' + (gained != null ? fmtNum(gained) : '-') + '</b> 分' +
+    (run.curBalance != null ? ' · 🏦 余额 ' + fmtNum(run.curBalance) : '') + '</div></div>';
+}
+function renderRunPool(run) {
+  var el = $('runPool');
+  if (!run || run.running !== true) { el.innerHTML = ''; return; }
   var html = '';
   var seen = {};
   var q = run.queue || [];
   var doneRows = [], failRows = [], partRows = [], pendRows = [];
   var curEmail = run.currentAccount;
-  // ---- 正在跑卡片 ----
-  if (curEmail) {
-    var mins = run.curStartedAt ? Math.max(0, Math.round((now - run.curStartedAt) / 60000)) : null;
-    var gained = run.curBalance != null && run.curInitial != null ? run.curBalance - run.curInitial : null;
-    var actLine = '';
-    if (run.curActivity) {
-      var actMin = run.curActivityTs ? Math.max(0, Math.round((now - run.curActivityTs) / 60000)) : 0;
-      actLine = '<div style="color:#666;font-size:12px;margin-top:2px">当前任务: ' + esc(actZh(run.curActivity)) +
-        (actMin > 0 ? '（已 ' + actMin + ' 分钟）' : '') + '</div>';
-    }
-    var etaLine = '';
-    if (d && d.eta && d.eta.meanMin && mins != null) {
-      var remain = Math.max(1, d.eta.meanMin - mins);
-      etaLine = '<div style="color:#666;font-size:12px;margin-top:2px">预计剩余 ~' + remain + ' 分钟（均值 ' + d.eta.meanMin + ' 分/账号）</div>';
-    }
-    html += '<div style="border:1px solid #d9ead9;background:#f4fbf6;border-radius:8px;padding:8px 10px;margin-bottom:8px">' +
-      '<div style="font-weight:600;color:#0a7d4e">▶ ' + esc(curEmail) +
-      ' <span style="font-weight:400;color:#888;font-size:12px">正在跑' + (mins != null ? ' · 已 ' + mins + ' 分钟' : '') + '</span></div>' +
-      actLine + etaLine +
-      '<div style="margin-top:2px">本次已获得: <b style="color:#0a7d4e">+' + (gained != null ? fmtNum(gained) : '-') + '</b> 分' +
-      (run.curBalance != null ? ' · 余额 ' + fmtNum(run.curBalance) : '') + '</div></div>';
-  }
   // ---- 分类: 已完成 / 待执行 ----
   for (var i = 0; i < q.length; i++) {
     var a = q[i];
@@ -4074,6 +4082,12 @@ function renderRunQueue(run, d) {
     var em2 = accountsCache[n].email;
     if (!inBatch[em2] && added.indexOf(em2) < 0) addable.push(em2);
   }
+  // 已追加的账号显示在队列池(当前账号跑完后加入执行)
+  var added = runPoolCache.addEmails || [];
+  for (var ai = 0; ai < added.length; ai++) {
+    var em3 = added[ai];
+    if (!seen[em3] && curEmail !== em3) pendRows.push('<span style="color:#1a5fb4">➕ ' + esc(em3) + '（已追加，当前账号完成后执行）</span>');
+  }
   if (addable.length) {
     var chips = addable.map(function (e2) {
       return '<button style="font-size:12px;padding:1px 8px;margin:1px 2px;cursor:pointer;border:1px solid #cde;border-radius:10px;background:#f4f9ff;color:#1a5fb4" onclick="poolAdd(&quot;' + esc(e2) + '&quot;, this)">+ ' + esc(e2) + '</button>';
@@ -4081,16 +4095,20 @@ function renderRunQueue(run, d) {
     html += '<div style="margin-bottom:8px"><div style="color:#666;font-size:12px;margin-bottom:3px">➕ 追加到本轮（点击即加入）</div>' + chips + '</div>';
   }
   // ---- 失败 / 部分完成 / 已完成 分区 ----
+  var poolHtml = '';
+  if (pendRows.length) {
+    poolHtml += '<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px"><div style="color:#666;font-size:12px;margin-bottom:3px">📋 队列池（' + pendRows.length + '，执行顺序随机；追加账号在当前账号完成后加入）</div>' + pendRows.join('<br>') + '</div>';
+  }
   if (partRows.length) {
-    html += '<div style="margin-bottom:8px"><div style="color:#9aa;font-size:12px;margin-bottom:3px">◐ 部分完成（' + partRows.length + '，主任务已跑，个别任务不适用）</div>' + partRows.join('<br>') + '</div>';
+    poolHtml += '<div style="margin-bottom:8px"><div style="color:#9aa;font-size:12px;margin-bottom:3px">◐ 部分完成（' + partRows.length + '，主任务已跑，个别任务不适用）</div>' + partRows.join('<br>') + '</div>';
   }
   if (failRows.length) {
-    html += '<div style="margin-bottom:8px"><div style="color:#c0392b;font-size:12px;margin-bottom:3px">❌ 失败（' + failRows.length + '，可能已进入兜底补跑）</div>' + failRows.join('<br>') + '</div>';
+    poolHtml += '<div style="margin-bottom:8px"><div style="color:#c0392b;font-size:12px;margin-bottom:3px">❌ 失败（' + failRows.length + '，可能已进入兜底补跑）</div>' + failRows.join('<br>') + '</div>';
   }
   if (doneRows.length) {
-    html += '<div><div style="color:#666;font-size:12px;margin-bottom:3px">✅ 已完成（' + doneRows.length + '）</div>' + doneRows.join('<br>') + '</div>';
+    poolHtml += '<div><div style="color:#666;font-size:12px;margin-bottom:3px">✅ 已完成（' + doneRows.length + '）</div>' + doneRows.join('<br>') + '</div>';
   }
-  el.innerHTML = html;
+  el.innerHTML = poolHtml || '<div style="color:#999;font-size:12px">队列池为空（全部账号已完成）</div>';
   refreshRunPool();
 }
 function refreshRunPool() {
