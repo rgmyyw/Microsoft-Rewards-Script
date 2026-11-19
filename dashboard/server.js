@@ -2593,8 +2593,12 @@ const server = http.createServer(async (req, res) => {
                     email: email,
                     balance: st.balance != null ? st.balance : live.balance != null ? live.balance : null,
                     balanceTs: st.balanceTs || null,
+                    // 日期守卫: 跨零点后昨天批次的累计不得显示为"今日"(2026-11-20 用户反馈)
                     todayCollected:
-                        byBalance != null ? byBalance : (st.todayCollected || 0) + (st.partialCollected || 0),
+                        byBalance != null
+                            ? byBalance
+                            : (st.todayDate === t ? st.todayCollected || 0 : 0) +
+                              (st.partialDate === t ? st.partialCollected || 0 : 0),
                     todaySource: byBalance != null ? 'balance' : 'log',
                     bonusCollected: st.bonusDate === t ? st.bonusCollected || 0 : 0,
                     tasksNA: st.tasksNA === t,
