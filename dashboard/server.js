@@ -3567,9 +3567,6 @@ const HTML = `<!DOCTYPE html>
   <div class="hint">容器内浏览器已打开(先移动端、后桌面端, 依次完成)。在下方窗口完成微软登录;停留在 Rewards 页面 5 秒会自动保存会话并进入下一平台, 两个平台都完成后自动结束。关闭本弹窗会中止会话(已保存的平台不受影响)。</div>
   <iframe id="mlFrame" style="width:100%;height:540px;border:1px solid var(--border-hi);border-radius:10px;background:#111"></iframe>
   <div class="sub" id="mlStatus" style="margin-top:8px"></div>
-  <div class="toolbar" style="margin-top:10px" id="mlToolbar">
-    <button class="btn" onclick="mlClose()">✕ 关闭并中止</button>
-  </div>
 </dialog>
 
 <dialog id="acctModal">
@@ -4848,7 +4845,6 @@ function openMlSession(index, mode) {
       $('mlEmail').textContent = (d.mode === 'redeem' ? '🛒 ' : '') + d.email;
       $('mlFrame').style.display = '';
       $('mlFrame').src = '/manual-vnc/' + d.token + '/vnc.html?path=' + encodeURIComponent('manual-vnc/' + d.token + '/websockify') + '&autoconnect=true&resize=scale';
-      var tb = $('mlToolbar'); if (tb) tb.style.display = '';
       var dlg = $('mlModal');
       if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
       ensureMlPoll();
@@ -4870,7 +4866,6 @@ function ensureMlPoll() {
         // 会话结束: 收起 VNC 区与中止按钮(黑屏/空白无意义且撑出滚动条), 数秒后自动关闭弹窗
         $('mlFrame').src = 'about:blank';
         $('mlFrame').style.display = 'none';
-        var tb = $('mlToolbar'); if (tb) tb.style.display = 'none';
         setTimeout(function () {
           var dlg = $('mlModal');
           if (dlg.close) dlg.close(); else dlg.removeAttribute('open');
