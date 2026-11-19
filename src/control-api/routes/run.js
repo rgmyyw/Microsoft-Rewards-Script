@@ -1,5 +1,6 @@
 import { resolveAccountSelection } from '../accounts.js'
 import { readJsonObject, sendJson, rejectUnknownFields } from '../http.js'
+import { clearRunPool, readRunPoolState, writeRunPoolState } from '../../core/RunPool.js'
 
 function readForce(body) {
     if ('force' in body && typeof body.force !== 'boolean') {
@@ -13,6 +14,8 @@ export function createRunRoutes({ pm, allowEnvOverrides, shutdown }) {
         // start or restart
         if (method === 'POST' && (pathname === '/start' || pathname === '/restart')) {
             const restarting = pathname === '/restart'
+            // 新批次开始: 清空上一轮的运行期账号池(移除/追加记录)
+            clearRunPool()
             const body = await readJsonObject(req)
             rejectUnknownFields(
                 body,
@@ -46,6 +49,32 @@ export function createRunRoutes({ pm, allowEnvOverrides, shutdown }) {
                 if (err.code === 'SHUTTING_DOWN') return sendJson(res, 503, { error: err.message, code: err.code })
                 if (err.code === 'BAD_REQUEST') return sendJson(res, 400, { error: err.message, code: err.code })
                 return sendJson(res, 500, { error: err.message })
+            }
+        }
+
+        // 运行期账号池: 移除未执行账号 / 追加账号(面板"待执行池"的后端)
+        if (pathname === '/run-pool') {
+            if (method === 'GET') {
+                return sendJson(res, 200, readRunPoolState())
+            }
+            if (method === 'POST') {
+                const body = await readJsonObject(req)
+                rejectUnknownFields(body, ['skipEmail', 'addEmails'])
+                const state = readRunPoolState()
+                if (body.skipEmail != null) {
+                    const email = String(body.skipEmail).trim().toLowerCase()
+                    if (!email) return sendJson(res, 400, { error: 'skipEmail 不能为空' })
+                    if (!state.skipEmails.includes(email)) state.skipEmails.push(email)
+                }
+                if (Array.isArray(body.addEmails)) {
+                    const fresh = body.addEmails.map(String).map(s => s.trim()).filter(Boolean)
+                    for (const email of fresh) {
+                        if (!state.addEmails.includes(email)) state.addEmails.push(email)
+                        state.skipEmails = state.skipEmails.filter(s => s !== email.toLowerCase())
+                    }
+                }
+                writeRunPoolState(state)
+                return sendJson(res, 200, { ok: true, ...state })
             }
         }
 

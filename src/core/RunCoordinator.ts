@@ -10,6 +10,7 @@ import type { IpcLog } from '../logging/Logger'
 import { loadAccounts } from '../config/Load'
 import { loadResolvedRegion } from '../session/SessionStore'
 import { resolveAccountLocale } from '../util/Locale'
+import { clearRunPool, readRunPoolState } from './RunPool'
 import HttpClient from '../network/HttpClient'
 import { sendNotifications } from '../logging/Notifications'
 import { ensureClawBotReady } from '../logging/ClawBot'
@@ -221,8 +222,40 @@ export class RunCoordinator {
     private async runTasks(accounts: Account[], runStartTime: number): Promise<AccountStats[]> {
         const accountStats: AccountStats[] = []
 
-        for (const [accountIndex, account] of accounts.entries()) {
-            accountStats.push(await this.processAccount(account, accountIndex > 0))
+        // 动态账号池: 每个账号开始前读取 config/run-pool.json, 支持运行期移除/追加
+        // (面板"待执行池"操作经控制API写入; 文件在 /start 时清空, 此处收尾时删除)
+        const pool = [...accounts]
+        const executedEmails = new Set<string>()
+        let appliedAdds = new Set<string>()
+        let cursor = 0
+        while (cursor < pool.length) {
+            this.bot.cancellation.signal.throwIfAborted()
+            const { skipEmails, addEmails } = readRunPoolState()
+            if (addEmails.length) {
+                const knownEmails = new Set(pool.map(a => a.email))
+                const fresh = addEmails.filter(email => !knownEmails.has(email) && !appliedAdds.has(email))
+                if (fresh.length) {
+                    const added = loadAccounts().filter(a => fresh.includes(a.email))
+                    pool.push(...added)
+                    appliedAdds = new Set([...appliedAdds, ...fresh])
+                    this.bot.logger.info(
+                        'main',
+                        'RUN-POOL',
+                        `账号池追加 ${fresh.length} 个账号: ${fresh.join(', ')}`
+                    )
+                }
+            }
+            const account = pool[cursor]
+            if (!account) break
+            if (skipEmails.includes(account.email) && !executedEmails.has(account.email)) {
+                this.bot.logger.info('main', 'RUN-POOL', `账号已从本轮池中移除, 跳过: ${account.email}`)
+                cursor++
+                continue
+            }
+
+            accountStats.push(await this.processAccount(account, cursor > 0))
+            executedEmails.add(account.email)
+            cursor++
         }
 
         // 兜底补跑：未成功账户冷却后重跑，结果覆盖原统计（风控跳过的账户不补跑）
@@ -241,6 +274,7 @@ export class RunCoordinator {
             process.exitCode = this.bot.cancellation.signal.aborted ? 143 : 0
         }
 
+        clearRunPool()
         return accountStats
     }
 

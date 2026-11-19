@@ -2380,6 +2380,19 @@ const server = http.createServer(async (req, res) => {
         if (p === '/api/stop' && req.method === 'POST') {
             return proxyContainerApi('/stop', 'POST', {}, res)
         }
+        // 运行期账号池: 透传到控制API(移除未执行账号/追加账号)
+        if (p === '/api/run-pool') {
+            if (req.method === 'GET') return proxyContainerApi('/run-pool', 'GET', null, res)
+            if (req.method === 'POST') {
+                let body = {}
+                try {
+                    body = await readBody(req)
+                } catch (e) {
+                    body = {}
+                }
+                return proxyContainerApi('/run-pool', 'POST', body, res)
+            }
+        }
         if (p === '/api/overview') {
             // 聚合概览: 一次返回前端所需的全部数据(账号/余额/今日获得/运行状态/调度/历史)
             // 容器 API 不可达时仍回退 state.json, 保证打开页面即可见上次已知数据
@@ -3301,14 +3314,13 @@ const HTML = `<!DOCTYPE html>
   </section>
 
   <section class="runstrip idle" id="runStrip">
-    <div class="rs-top" id="rsTop" style="cursor:pointer" title="点击展开/收起账号队列" onclick="toggleRunQueue()">
+    <div class="rs-top">
       <span class="rs-title" id="rsTitle">空闲</span>
       <span class="rs-cur" id="rsCur"></span>
       <span class="rs-meta" id="rsMeta"></span>
-      <span id="rsToggle" style="margin-left:8px;opacity:.65">▸</span>
     </div>
     <div class="pbar" id="rsBar" style="display:none"><div class="fill" id="rsFill" style="width:0%"></div></div>
-    <div id="runQueue" style="display:none;margin-top:8px;font-size:12.5px;line-height:1.9"></div>
+    <div id="runQueue" style="margin-top:8px;font-size:12.5px;line-height:1.9"></div>
   </section>
 
   <section class="toolbar">
@@ -3583,7 +3595,7 @@ const HTML = `<!DOCTYPE html>
 </dialog>
 <script>
 'use strict';
-var API = { overview:'/api/overview', trends:'/api/trends', pushConfig:'/api/push-config', pushTest:'/api/push-test', rewardsMode:'/api/rewards-mode', netdiagConfig:'/api/netdiag-config', start:'/api/start', stop:'/api/stop', loginCheck:'/api/login-check', loginCheckStatus:'/api/login-check/status', syncAll:'/api/sync-all', marketProbe:'/api/market-probe', marketProbeStatus:'/api/market-probe/status', netDiag:'/api/net-diag', netDiagStatus:'/api/net-diag/status', manualLogin:'/api/manual-login', manualLoginStatus:'/api/manual-login/status', manualLoginStop:'/api/manual-login/stop', quarantine:'/api/quarantine', quarantineClear:'/api/quarantine/clear', accountsManage:'/api/accounts-manage', accountsPass:'/api/accounts-manage/password', accountsGeo:'/api/accounts-manage/geo', capabilities:'/api/capabilities', schedule:'/api/capabilities/schedule', accountLogs:'/api/account-logs', accountLogDates:'/api/account-log-dates', accountHistory:'/api/account-history' };
+var API = { overview:'/api/overview', trends:'/api/trends', pushConfig:'/api/push-config', pushTest:'/api/push-test', rewardsMode:'/api/rewards-mode', netdiagConfig:'/api/netdiag-config', start:'/api/start', stop:'/api/stop', loginCheck:'/api/login-check', loginCheckStatus:'/api/login-check/status', syncAll:'/api/sync-all', marketProbe:'/api/market-probe', marketProbeStatus:'/api/market-probe/status', netDiag:'/api/net-diag', netDiagStatus:'/api/net-diag/status', manualLogin:'/api/manual-login', manualLoginStatus:'/api/manual-login/status', manualLoginStop:'/api/manual-login/stop', quarantine:'/api/quarantine', quarantineClear:'/api/quarantine/clear', accountsManage:'/api/accounts-manage', accountsPass:'/api/accounts-manage/password', accountsGeo:'/api/accounts-manage/geo', capabilities:'/api/capabilities', schedule:'/api/capabilities/schedule', accountLogs:'/api/account-logs', accountLogDates:'/api/account-log-dates', accountHistory:'/api/account-history', runPool:'/api/run-pool' };
 var selected = {};
 var selectionReady = false; // 首次拿到账号列表时默认全选, 之后尊重用户的选择
 var accountsCache = [];
@@ -3821,21 +3833,34 @@ function renderRunStrip(run, d, now) {
   renderRunQueue(run);
 }
 
-// ---- 运行条队列展开(跑完/正在跑/排队) ----
-var runQueueOpen = false;
-function toggleRunQueue() {
-  runQueueOpen = !runQueueOpen;
-  $('rsToggle').textContent = runQueueOpen ? '▾' : '▸';
-  $('runQueue').style.display = runQueueOpen ? '' : 'none';
-  renderRunQueue(runCache);
+// ---- 运行账号池(常显): 事实状态 + 待执行池(可移除/追加, 执行顺序随机) ----
+var runPoolCache = { skipEmails: [], addEmails: [] };
+function poolSkip(email) {
+  if (!confirm('将 ' + email + ' 从本轮待执行池移除？')) return;
+  apiFetch(API.runPool, { method: 'POST', body: { skipEmail: email } }).then(function () {
+    runPoolCache.skipEmails = (runPoolCache.skipEmails || []).concat([email]);
+    renderRunQueue(runCache);
+    toast('已移除: ' + email);
+  }).catch(function (e) { toast('移除失败: ' + e.message, false); });
+}
+function poolAdd() {
+  var sel = $('poolAddSel');
+  var email = sel && sel.value;
+  if (!email) return;
+  apiFetch(API.runPool, { method: 'POST', body: { addEmails: [email] } }).then(function () {
+    runPoolCache.addEmails = (runPoolCache.addEmails || []).concat([email]);
+    runPoolCache.skipEmails = (runPoolCache.skipEmails || []).filter(function (s) { return s !== email; });
+    renderRunQueue(runCache);
+    toast('已追加: ' + email);
+  }).catch(function (e) { toast('追加失败: ' + e.message, false); });
 }
 function renderRunQueue(run) {
   var el = $('runQueue');
-  if (!runQueueOpen) { el.innerHTML = ''; return; }
-  if (!run || run.running !== true) { el.innerHTML = '<span style="color:#888">当前没有运行中的批次</span>'; return; }
+  if (!run || run.running !== true) { el.innerHTML = ''; return; }
   var rows = [];
   var seen = {};
   var q = run.queue || [];
+  var pending = [];
   for (var i = 0; i < q.length; i++) {
     var a = q[i];
     seen[a.email] = true;
@@ -3845,18 +3870,48 @@ function renderRunQueue(run) {
       rows.push('<span style="color:#888">✓ ' + esc(a.email) + (a.gained != null ? ' · +' + fmtNum(a.gained) + ' 分' : '') + '</span>');
     } else if (a.done) {
       rows.push('<span style="color:#c0392b">✗ ' + esc(a.email) + (a.error ? ' · ' + esc(String(a.error).slice(0, 80)) : '') + '</span>');
-    } else {
-      rows.push('<span style="color:#888">⏳ ' + esc(a.email) + '（等待中）</span>');
     }
   }
-  // 控制台尚未上报的账号 = 排队。补齐源: 本轮计划集合(选定账号启动时), 全量启动或无记录时用账号全集
+  // 未上报的账号 = 待执行池(执行顺序随机, 非固定队列); 可移除
+  var poolSkipped = runPoolCache.skipEmails || [];
   var plan = run.planEmails;
   var pool = plan && plan.length ? plan : accountsCache.map(function (a) { return a.email; });
+  var candidates = [];
   for (var j = 0; j < pool.length; j++) {
     var em = pool[j];
-    if (!seen[em]) rows.push('<span style="color:#9aa">… ' + esc(em) + '（排队）</span>');
+    if (seen[em]) continue;
+    if (poolSkipped.indexOf(em) >= 0) {
+      rows.push('<span style="color:#bbb;text-decoration:line-through">✕ ' + esc(em) + '（已从本轮移除）</span>');
+      continue;
+    }
+    pending.push(em);
+    candidates.push(em);
   }
+  for (var k = 0; k < pending.length; k++) {
+    rows.push('<span style="color:#9aa">· ' + esc(pending[k]) +
+      ' <button style="font-size:11px;padding:0 6px;margin-left:4px;cursor:pointer;border:1px solid #ddd;border-radius:4px;background:#fff;color:#c0392b" onclick="poolSkip(\'' + esc(pending[k]) + '\')">移除</button></span>');
+  }
+  // 追加账号: 全集里不在本轮的账号
+  var inBatch = {};
+  for (var m = 0; m < pool.length; m++) inBatch[pool[m]] = true;
+  var addable = [];
+  for (var n = 0; n < accountsCache.length; n++) {
+    var em2 = accountsCache[n].email;
+    if (!inBatch[em2] && (runPoolCache.addEmails || []).indexOf(em2) < 0) addable.push(em2);
+  }
+  if (addable.length) {
+    var opts = addable.map(function (e2) { return '<option value="' + esc(e2) + '">' + esc(e2) + '</option>'; }).join('');
+    rows.push('<span style="color:#9aa">+ <select id="poolAddSel" style="font-size:12px;max-width:200px">' + opts + '</select>' +
+      ' <button style="font-size:11px;padding:0 6px;cursor:pointer;border:1px solid #ddd;border-radius:4px;background:#fff;color:#0a7d4e" onclick="poolAdd()">追加到本轮</button></span>');
+  }
+  rows.unshift('<span style="color:#999;font-size:11.5px">执行顺序随机；待执行池中的账号可移除，也可追加账号到本轮</span>');
   el.innerHTML = rows.join('<br>');
+  refreshRunPool();
+}
+function refreshRunPool() {
+  apiFetch(API.runPool, null, 5000).then(function (s) {
+    runPoolCache = s || { skipEmails: [], addEmails: [] };
+  }).catch(function () { });
 }
 
 // ---- 下次定时运行倒计时(每日 cron) ----

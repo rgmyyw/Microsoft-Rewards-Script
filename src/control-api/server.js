@@ -173,7 +173,7 @@ const routes = [
     { path: /^\/(?:config(?:\/(?:diff|sync))?|schedule)$/, handle: settings },
     { path: /^\/sessions(?:\/.*)?$/, handle: sessions },
     { path: /^\/diagnostics(?:\/.*)?$/, handle: diagnostics },
-    { path: /^\/(?:start|stop|restart|shutdown)$/, handle: runs }
+    { path: /^\/(?:start|stop|restart|shutdown|run-pool)$/, handle: runs }
 ]
 
 async function requestHandler(req, res) {
