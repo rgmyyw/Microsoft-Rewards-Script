@@ -2683,6 +2683,7 @@ const server = http.createServer(async (req, res) => {
                               email: a.email,
                               done: !!a.done,
                               success: a.success !== false,
+                              status: a.status || null,
                               gained: a.collected != null ? a.collected : null,
                               error: a.error || null
                           })),
@@ -4005,7 +4006,7 @@ function renderRunQueue(run, d) {
   var html = '';
   var seen = {};
   var q = run.queue || [];
-  var doneRows = [], failRows = [], pendRows = [];
+  var doneRows = [], failRows = [], partRows = [], pendRows = [];
   var curEmail = run.currentAccount;
   // ---- 正在跑卡片 ----
   if (curEmail) {
@@ -4035,8 +4036,13 @@ function renderRunQueue(run, d) {
     seen[a.email] = true;
     if (a.done && a.success) {
       doneRows.push('<span style="color:#888">✓ ' + esc(a.email) + (a.gained != null ? ' <b style="color:#0a7d4e">+' + fmtNum(a.gained) + '</b>' : '') + '</span>');
+    } else if (a.done && a.status === 'partial') {
+      // 部分完成: 主任务大多成功, 个别任务不适用——灰色弱化, 不红字吓人
+      var perr = esc(String(a.error || '').replace(/Punchcard child: step incomplete;?\s*/g, '').slice(0, 40));
+      partRows.push('<span style="color:#9aa">◐ ' + esc(a.email) + (perr ? ' · 个别任务未完成: ' + perr : ' · 个别任务未适用') + '</span>');
     } else if (a.done) {
-      failRows.push('<span style="color:#c0392b">✗ ' + esc(a.email) + (a.error ? ' · ' + esc(String(a.error).slice(0, 50)) : '') + '</span>');
+      var ferr = String(a.error || '').replace(/Punchcard child: step incomplete;?\s*/g, '打卡子任务未确认 ').slice(0, 50);
+      failRows.push('<span style="color:#c0392b">✗ ' + esc(a.email) + (ferr ? ' · ' + esc(ferr) : '') + '</span>');
     }
   }
   var skipped = runPoolCache.skipEmails || [];
@@ -4072,9 +4078,12 @@ function renderRunQueue(run, d) {
     }).join(' ');
     html += '<div style="margin-bottom:8px"><div style="color:#666;font-size:12px;margin-bottom:3px">➕ 追加到本轮（点击即加入）</div>' + chips + '</div>';
   }
-  // ---- 失败/异常 与 已完成 分区 ----
+  // ---- 失败 / 部分完成 / 已完成 分区 ----
+  if (partRows.length) {
+    html += '<div style="margin-bottom:8px"><div style="color:#9aa;font-size:12px;margin-bottom:3px">◐ 部分完成（' + partRows.length + '，主任务已跑，个别任务不适用）</div>' + partRows.join('<br>') + '</div>';
+  }
   if (failRows.length) {
-    html += '<div style="margin-bottom:8px"><div style="color:#c0392b;font-size:12px;margin-bottom:3px">❌ 异常（' + failRows.length + '，可能已进入兜底补跑）</div>' + failRows.join('<br>') + '</div>';
+    html += '<div style="margin-bottom:8px"><div style="color:#c0392b;font-size:12px;margin-bottom:3px">❌ 失败（' + failRows.length + '，可能已进入兜底补跑）</div>' + failRows.join('<br>') + '</div>';
   }
   if (doneRows.length) {
     html += '<div><div style="color:#666;font-size:12px;margin-bottom:3px">✅ 已完成（' + doneRows.length + '）</div>' + doneRows.join('<br>') + '</div>';
