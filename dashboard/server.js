@@ -321,7 +321,18 @@ function normalizeEntry(entry) {
     return { ...entry, message, user, title, platform }
 }
 
-// 统一 markdown 卡片: 标题行 + 字段列表(钉钉 markdown 渲染)
+// 状态中文映射 + 耗时人性化(推送卡片用)
+function statusZh(s) {
+    return { completed: '✅ 完成', partial: '⚠️ 部分完成', cancelled: '🛑 已取消', failed: '❌ 失败', skipped: '⏭ 跳过', interrupted: '🛑 中断' }[s] || s
+}
+function fmtDurSec(sec) {
+    const n = Number(sec)
+    if (!Number.isFinite(n)) return '-'
+    if (n < 60) return Math.round(n) + ' 秒'
+    const m = Math.floor(n / 60), s = Math.round(n % 60)
+    return s ? `${m} 分 ${s} 秒` : `${m} 分钟`
+}
+// 统一 markdown 卡片: emoji 标题行 + 字段列表(钉钉 markdown 渲染)
 function cardMd(icon, heading, fields) {
     const body = fields
         .filter(Boolean)
@@ -344,6 +355,7 @@ function pushForEntry(rawEntry) {
     const email = (message.match(/(\S+@\S+)/) || [])[1] || entry.user || ''
 
     let key = null
+    let icon = ''
     let heading = null
     let fields = null
 
@@ -353,13 +365,15 @@ function pushForEntry(rawEntry) {
         // 本轮账号列表: 启动时记录的计划集合(选定账号启动), 全量启动用账号全集
         const plan = state.currentRunPlan && state.currentRunPlan.length ? state.currentRunPlan : accountsCache.map(a => a.email)
         const names = plan.map(e => '`' + e + '`').join('、')
-        fields = [`本轮共 **${accounts ?? plan.length}** 个账号（执行顺序随机）`, names || '（账号列表待定）']
+        fields = [`📊 本轮共 **${accounts ?? plan.length}** 个账号（执行顺序随机）`, `📋 ${names || '（账号列表待定）'}`]
         heading = '开始运行'
+        icon = '🚀'
     } else if (title === 'ACCOUNT-START' && ev.accountStart && ev.accountStart.enabled !== false) {
         key = 'accountStart'
         const geo = extractField(message, /geoLocale:\s*(\S+)/)
-        fields = [`账号: **${email || '未知'}**`, geo ? `地区: ${geo}` : null, `状态: ▶ 开始执行`]
+        fields = [`👤 账号: **${email || '未知'}**`, geo ? `🌏 地区: ${geo}` : null, `🎬 状态: 开始执行`]
         heading = '账号开始执行'
+        icon = '▶️'
     } else if (title === 'RUN-END' && ev.runEnd.enabled) {
         key = 'runEnd'
         const accounts = extractField(message, /(?:accountsProcessed|处理账户数)=(\d+)/)
@@ -368,12 +382,13 @@ function pushForEntry(rawEntry) {
         const runtime = extractField(message, /(?:runtimeMinutes|运行分钟数)=([\d.]+)/)
         const status = extractField(message, /(?:status|状态)=(\w+)/)
         fields = [
-            `处理账号: **${accounts ?? '-'}** 个`,
-            `本轮共获得: **${gained ?? '-'}** 分`,
-            `当前总余额: **${balance ?? '-'}** 分`,
-            `耗时: ${runtime ?? '-'} 分钟${status ? ` | 结果: ${status}` : ''}`
+            `📊 处理账号: **${accounts ?? '-'}** 个`,
+            `💰 本轮共获得: **${gained ?? '-'}** 分`,
+            `🏦 当前总余额: **${balance ?? '-'}** 分`,
+            `⏱ 耗时: ${runtime ? Math.round(Number(runtime)) + ' 分钟' : '-'}${status ? ` | ${statusZh(status)}` : ''}`
         ]
         heading = '全部账号执行完成'
+        icon = '🏁'
     } else if (title === 'ACCOUNT-END' && ev.accountEnd.enabled) {
         key = 'accountEnd'
         const gained = extractField(message, /(?:pointsGained|获得积分)=(-?\d+)/)
@@ -381,36 +396,39 @@ function pushForEntry(rawEntry) {
         const status = extractField(message, /(?:\| )?status=(\w+)/)
         const dur = extractField(message, /(?:durationSeconds|耗时秒)=(\S+?)(?:\s|\|)/)
         fields = [
-            `账号: **${email || '未知'}**`,
-            `本次获得: **${gained ?? '-'}** 分`,
-            `当前余额: **${balance ?? '-'}** 分`,
-            (status ? `结果: ${status === 'completed' ? '✅ 完成' : status === 'partial' ? '⚠️ 部分完成' : status}` : null),
-            (dur ? `耗时: ${dur} 秒` : null)
+            `👤 账号: **${email || '未知'}**`,
+            `💰 本次获得: **${gained ?? '-'}** 分`,
+            `🏦 当前余额: **${balance ?? '-'}** 分`,
+            (status ? `📋 结果: ${statusZh(status)}` : null),
+            (dur ? `⏱ 耗时: ${fmtDurSec(dur)}` : null)
         ]
         heading = '账号执行完成'
+        icon = status === 'completed' ? '✅' : status === 'partial' ? '⚠️' : status === 'cancelled' ? '🛑' : '❌'
     } else if ((/ERROR/.test(title) || level === 'error') && ev.error.enabled) {
         // 停止批次引发的次生失败(用户主动停止/中断)不推送
         if (/Run cancelled| Run interrupted|cancellation/i.test(message)) return
         key = 'error'
         fields = [
-            (email ? `账号: **${email}**` : null),
-            (entry.platform && entry.platform !== 'MAIN' ? `平台: ${entry.platform}` : null),
-            message || '(无详情)'
+            (email ? `👤 账号: **${email}**` : null),
+            (entry.platform && entry.platform !== 'MAIN' ? `📱 平台: ${entry.platform}` : null),
+            '🐛 ' + (message || '(无详情)')
         ]
         heading = '任务错误'
+        icon = '❌'
     } else if ((/LOGIN/.test(title) && /fail|失败|denied|error/i.test(message)) || /BOT-WARNING/.test(title)) {
         if (ev.loginFail.enabled) {
             key = 'loginFail'
-            fields = [(email ? `账号: **${email}**` : null), message.slice(0, 800)]
+            fields = [(email ? `👤 账号: **${email}**` : null), '⚠️ ' + message.slice(0, 800)]
             heading = '登录/风控异常'
+            icon = '🚨'
         }
     }
 
     if (key && fields && shouldSend(key)) {
         const kw = pushConfig.dingtalk.keyword || 'MS-Rewards'
-        const md = `### ${kw}\n\n${cardMd('', heading, fields)}`.replace('###  ', '### ')
+        const md = cardMd(icon, heading, fields)
         if (pushConfig.dingtalk.enabled && pushConfig.dingtalk.accessToken) {
-            sendDingTalk(`${kw} ${heading}`, md).then(r => {
+            sendDingTalk(`${kw} ${icon} ${heading}`, md).then(r => {
                 log('INFO', `${r.ok ? '✓' : '✗'} 钉钉推送 ${key} -> ${r.resp ? r.resp.slice(0, 100) : 'ok'}`)
             })
         }
