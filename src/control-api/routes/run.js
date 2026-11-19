@@ -65,6 +65,8 @@ export function createRunRoutes({ pm, allowEnvOverrides, shutdown }) {
                     const email = String(body.skipEmail).trim().toLowerCase()
                     if (!email) return sendJson(res, 400, { error: 'skipEmail 不能为空' })
                     if (!state.skipEmails.includes(email)) state.skipEmails.push(email)
+                    // 移除同时清掉追加记录(先追加又移除 = 净效果不执行)
+                    state.addEmails = state.addEmails.filter(s => s.toLowerCase() !== email)
                 }
                 if (Array.isArray(body.addEmails)) {
                     const fresh = body.addEmails.map(String).map(s => s.trim()).filter(Boolean)
