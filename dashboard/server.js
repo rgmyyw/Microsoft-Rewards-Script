@@ -364,15 +364,18 @@ function pushForEntry(rawEntry) {
         const accounts = extractField(message, /Accounts:\s*(\d+)/)
         // 本轮账号列表: 启动时记录的计划集合(选定账号启动), 全量启动用账号全集
         const plan = state.currentRunPlan && state.currentRunPlan.length ? state.currentRunPlan : accountsCache.map(a => a.email)
-        const names = plan.map(e => '`' + e + '`').join('、')
-        fields = [`📊 本轮共 **${accounts ?? plan.length}** 个账号（执行顺序随机）`, `📋 ${names || '（账号列表待定）'}`]
+        const names = plan.map((e, i) => `${i + 1}. ${e}`).join('\n')
+        fields = [`📊 本轮共 **${accounts ?? plan.length}** 个账号（执行顺序随机）`, `📋 账号清单:\n${names || '（账号列表待定）'}`]
         heading = '开始运行'
         icon = '🚀'
     } else if (title === 'ACCOUNT-START' && ev.accountStart && ev.accountStart.enabled !== false) {
         key = 'accountStart'
         const geo = extractField(message, /geoLocale:\s*(\S+)/)
-        fields = [`👤 账号: **${email || '未知'}**`, geo ? `🌏 地区: ${geo}` : null, `🎬 状态: 开始执行`]
-        heading = '账号开始执行'
+        // 进度: 本轮计划中的序号(第 N 个 / 共 M 个)
+        const plan = state.currentRunPlan && state.currentRunPlan.length ? state.currentRunPlan : accountsCache.map(a => a.email)
+        const idx = plan.indexOf(email) >= 0 ? `${plan.indexOf(email) + 1}/${plan.length}` : null
+        fields = [geo ? `🌏 地区: ${geo}` : null, `📋 本轮进度: ${idx ? `第 **${idx}** 个` : '当前批次'}`]
+        heading = `开始执行 ${email || '未知'}`
         icon = '▶️'
     } else if (title === 'RUN-END' && ev.runEnd.enabled) {
         key = 'runEnd'
