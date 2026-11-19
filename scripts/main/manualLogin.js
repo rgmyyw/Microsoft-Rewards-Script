@@ -208,7 +208,11 @@ function startAutoFill(page, account) {
             } catch {
                 return // 页面跳转/上下文销毁等, 静默停止观察
             }
-            await new Promise(r => setTimeout(r, 1000))
+            // unref: 观察定时器不得阻止进程退出(否则登录完成后 runner 挂起, 面板会话永不结束)
+            await new Promise(resolve => {
+                const t = setTimeout(resolve, 1000)
+                if (t && typeof t.unref === 'function') t.unref()
+            })
         }
     })()
 }
