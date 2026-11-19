@@ -260,8 +260,9 @@ export class BrowserPunchCards extends BaseActivity {
                     }
 
                     state = await this.readQuest(page, parent, true)
-                    for (let check = 0; check < 2 && !confirmed(); check++) {
-                        await this.bot.utils.wait(1500)
+                    // 微软侧完成状态同步常有延迟, 3 秒窗口会误判真实完成的子任务(实测多轮 step-incomplete)
+                    for (let check = 0; check < 5 && !confirmed(); check++) {
+                        await this.bot.utils.wait(2000)
                         state = await this.readQuest(page, parent, true)
                     }
                     return verifier.verify(
