@@ -16,7 +16,11 @@ export function isBrowserClosedError(error: unknown): boolean {
         msg.includes('connection closed') ||
         msg.includes('session closed') ||
         msg.includes('page closed') ||
-        msg.includes('websocket connection closed')
+        msg.includes('websocket connection closed') ||
+        // 关闭后的 CDP 调用: Protocol error (...): Failed to find browser context for id ...
+        msg.includes('failed to find browser context') ||
+        msg.includes('browser context for id') ||
+        (msg.includes('protocol error') && (msg.includes('closed') || msg.includes('browser context')))
     )
 }
 
