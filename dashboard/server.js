@@ -55,6 +55,7 @@ function defaultPushConfig() {
         },
         events: {
             runStart: { enabled: true, label: '🚀 开始运行' },
+            accountStart: { enabled: true, label: '▶ 账号开始' },
             runEnd: { enabled: true, label: '✅ 全部完成' },
             accountEnd: { enabled: true, label: '👤 账号完成' },
             error: { enabled: true, label: '❌ 错误' },
@@ -235,13 +236,14 @@ function buildDingUrl(cfg) {
     return u
 }
 
-function sendDingTalk(content) {
+function sendDingTalk(title, markdownOrText) {
     if (!pushConfig.dingtalk.enabled || !pushConfig.dingtalk.accessToken) {
         return Promise.resolve({ ok: false, error: '钉钉未启用或缺少 accessToken' })
     }
+    const md = markdownOrText.slice(0, 18000)
     const data = JSON.stringify({
-        msgtype: 'text',
-        text: { content: content.slice(0, 1800) } // 钉钉 text 上限 2000
+        msgtype: 'markdown',
+        markdown: { title: String(title || 'MS-Rewards').slice(0, 64), text: md } // 钉钉 markdown 上限 20000
     })
     const url = new URL(buildDingUrl(pushConfig.dingtalk))
     const opts = {
@@ -287,7 +289,46 @@ function extractField(msg, re) {
     return m ? m[1] : null
 }
 
-function pushForEntry(entry) {
+// 防御解析: 控制API 偶发无法解析 __REWARDS_EVENT__ 行(如浏览器日志嵌串破坏 JSON)时,
+// entry.message 会是整行原始事件。此处剥离前缀并尝试还原结构化字段, 失败则截断原文
+function normalizeEntry(entry) {
+    let message = String(entry.message || '')
+    let user = entry.user || ''
+    let title = entry.title || ''
+    let platform = entry.platform || ''
+    const prefix = '__REWARDS_EVENT__ '
+    if (message.startsWith(prefix) || /^\{"version":\d,"runId"/.test(message)) {
+        const raw = message.startsWith(prefix) ? message.slice(prefix.length) : message
+        try {
+            const ev = JSON.parse(raw)
+            message = String(ev.message || '')
+            user = ev.user || user
+            title = ev.title || title
+            platform = ev.platform || platform
+        } catch (e) {
+            const mm = raw.match(/"message":"([\s\S]{0,800}?)(?:","|\})/)
+            const mu = raw.match(/"user":"([^"]+)"/)
+            const mt = raw.match(/"title":"([^"]+)"/)
+            if (mm) message = mm[1]
+            if (mu) user = mu[1]
+            if (mt) title = mt[1]
+            if (!mm) message = message.slice(0, 500)
+        }
+    }
+    return { ...entry, message, user, title, platform }
+}
+
+// 统一 markdown 卡片: 标题行 + 字段列表(钉钉 markdown 渲染)
+function cardMd(icon, heading, fields) {
+    const body = fields
+        .filter(Boolean)
+        .map(f => (f.startsWith('- ') || f.startsWith('### ') ? f : '- ' + f))
+        .join('\n\n')
+    return `### ${icon} ${heading}\n\n${body}`
+}
+
+function pushForEntry(rawEntry) {
+    const entry = normalizeEntry(rawEntry)
     const ev = pushConfig.events || {}
     const title = (entry.title || '').toUpperCase()
     const level = (entry.level || '').toLowerCase()
@@ -296,50 +337,78 @@ function pushForEntry(entry) {
     const email = (message.match(/(\S+@\S+)/) || [])[1] || entry.user || ''
 
     let key = null
-    let lines = null
+    let heading = null
+    let fields = null
 
     if (title === 'RUN-START' && ev.runStart.enabled) {
         key = 'runStart'
-        lines = [`🚀 开始运行`, `微软积分脚本开始执行（账号数见日志）`]
+        const accounts = extractField(message, /Accounts:\s*(\d+)/)
+        // 本轮账号列表: 启动时记录的计划集合(选定账号启动), 全量启动用账号全集
+        const plan = state.currentRunPlan && state.currentRunPlan.length ? state.currentRunPlan : accountsCache.map(a => a.email)
+        const names = plan.map(e => '`' + e + '`').join('、')
+        fields = [`本轮共 **${accounts ?? plan.length}** 个账号（执行顺序随机）`, names || '（账号列表待定）']
+        heading = '开始运行'
+    } else if (title === 'ACCOUNT-START' && ev.accountStart && ev.accountStart.enabled !== false) {
+        key = 'accountStart'
+        const geo = extractField(message, /geoLocale:\s*(\S+)/)
+        fields = [`账号: **${email || '未知'}**`, geo ? `地区: ${geo}` : null, `状态: ▶ 开始执行`]
+        heading = '账号开始执行'
     } else if (title === 'RUN-END' && ev.runEnd.enabled) {
         key = 'runEnd'
         const accounts = extractField(message, /(?:accountsProcessed|处理账户数)=(\d+)/)
         const gained = extractField(message, /(?:pointsGained|获得积分)=(-?\d+)/)
         const balance = extractField(message, /(?:currentBalance|现余额)=(\d+)/)
         const runtime = extractField(message, /(?:runtimeMinutes|运行分钟数)=([\d.]+)/)
-        lines = [
-            `✅ 全部完成`,
-            `账号: ${accounts ?? '-'} | 本次获得: ${gained ?? '-'} 分`,
-            `当前总余额: ${balance ?? '-'} | 耗时: ${runtime ?? '-'} 分钟`
+        const status = extractField(message, /(?:status|状态)=(\w+)/)
+        fields = [
+            `处理账号: **${accounts ?? '-'}** 个`,
+            `本轮共获得: **${gained ?? '-'}** 分`,
+            `当前总余额: **${balance ?? '-'}** 分`,
+            `耗时: ${runtime ?? '-'} 分钟${status ? ` | 结果: ${status}` : ''}`
         ]
+        heading = '全部账号执行完成'
     } else if (title === 'ACCOUNT-END' && ev.accountEnd.enabled) {
         key = 'accountEnd'
         const gained = extractField(message, /(?:pointsGained|获得积分)=(-?\d+)/)
         const balance = extractField(message, /(?:currentBalance|现余额)=(\d+)/)
-        lines = [`👤 账号完成`, `${email || '账号'}: 本次 +${gained ?? '-'} 分 | 余额 ${balance ?? '-'}`]
+        const status = extractField(message, /(?:\| )?status=(\w+)/)
+        const dur = extractField(message, /(?:durationSeconds|耗时秒)=(\S+?)(?:\s|\|)/)
+        fields = [
+            `账号: **${email || '未知'}**`,
+            `本次获得: **${gained ?? '-'}** 分`,
+            `当前余额: **${balance ?? '-'}** 分`,
+            (status ? `结果: ${status === 'completed' ? '✅ 完成' : status === 'partial' ? '⚠️ 部分完成' : status}` : null),
+            (dur ? `耗时: ${dur} 秒` : null)
+        ]
+        heading = '账号执行完成'
     } else if ((/ERROR/.test(title) || level === 'error') && ev.error.enabled) {
+        // 停止批次引发的次生失败(用户主动停止/中断)不推送
+        if (/Run cancelled| Run interrupted|cancellation/i.test(message)) return
         key = 'error'
-        lines = [`❌ 错误`, (email ? `账号 ${email}\n` : '') + message.slice(0, 300) || message.slice(0, 300)]
+        fields = [
+            (email ? `账号: **${email}**` : null),
+            (entry.platform && entry.platform !== 'MAIN' ? `平台: ${entry.platform}` : null),
+            message || '(无详情)'
+        ]
+        heading = '任务错误'
     } else if ((/LOGIN/.test(title) && /fail|失败|denied|error/i.test(message)) || /BOT-WARNING/.test(title)) {
         if (ev.loginFail.enabled) {
             key = 'loginFail'
-            lines = [
-                `⚠️ 登录/风控异常`,
-                (email ? `账号 ${email}\n` : '') + message.slice(0, 300) || message.slice(0, 300)
-            ]
+            fields = [(email ? `账号: **${email}**` : null), message.slice(0, 800)]
+            heading = '登录/风控异常'
         }
     }
 
-    if (key && lines && shouldSend(key)) {
-        const text = lines.join('\n')
+    if (key && fields && shouldSend(key)) {
+        const kw = pushConfig.dingtalk.keyword || 'MS-Rewards'
+        const md = `### ${kw}\n\n${cardMd('', heading, fields)}`.replace('###  ', '### ')
         if (pushConfig.dingtalk.enabled && pushConfig.dingtalk.accessToken) {
-            const kw = pushConfig.dingtalk.keyword || 'MS-Rewards'
-            sendDingTalk(`[${kw}] ${text}`).then(r => {
+            sendDingTalk(`${kw} ${heading}`, md).then(r => {
                 log('INFO', `${r.ok ? '✓' : '✗'} 钉钉推送 ${key} -> ${r.resp ? r.resp.slice(0, 100) : 'ok'}`)
             })
         }
         if (emailReady()) {
-            sendEventEmail(lines).then(r => {
+            sendEventEmail([heading, ...fields.filter(Boolean).map(f => f.replace(/^[-`*]|`$/g, ''))]).then(r => {
                 log('INFO', `${r.ok ? '✓' : '✗'} 邮件推送 ${key} -> ${r.ok ? pushConfig.email.to : r.error || '失败'}`)
             })
         }
@@ -1075,7 +1144,8 @@ setInterval(() => {
         dailySummarySentDate = d
         const lines = buildDailySummaryLines()
         if (pushConfig.dingtalk.enabled && pushConfig.dingtalk.accessToken) {
-            sendDingTalk('[' + (pushConfig.dingtalk.keyword || 'MS-Rewards') + '] ' + lines.join('\n')).then(r => {
+            const kw = pushConfig.dingtalk.keyword || 'MS-Rewards'
+            sendDingTalk(kw + ' 运行摘要', `### 📊 ${kw} 每日摘要\n\n` + lines.map(l => '- ' + l).join('\n\n')).then(r => {
                 log('INFO', (r.ok ? '✓' : '✗') + ' 每日摘要钉钉 -> ' + (r.resp ? r.resp.slice(0, 100) : 'ok'))
             })
         }
@@ -1739,9 +1809,10 @@ function restoreQuarantineAccount(em) {
 function quarantineAlert(em, title, lines) {
     const ev = (pushConfig.events || {}).quarantine
     if (ev && ev.enabled === false) return
-    const text = ['[' + (pushConfig.dingtalk.keyword || 'MS-Rewards') + '] ' + title, ...lines].join('\n')
+    const kw = pushConfig.dingtalk.keyword || 'MS-Rewards'
+    const md = `### ${kw} ${title}\n\n` + lines.map(l => '- ' + l).join('\n\n')
     if (pushConfig.dingtalk.enabled && pushConfig.dingtalk.accessToken) {
-        sendDingTalk(text).then(r =>
+        sendDingTalk(kw + ' ' + title, md).then(r =>
             log(
                 'INFO',
                 (r.ok ? '✓' : '✗') +
@@ -2319,9 +2390,11 @@ const server = http.createServer(async (req, res) => {
             const stamp = new Date().toLocaleString('zh-CN')
             const tasks = []
             if (pushConfig.dingtalk.enabled && pushConfig.dingtalk.accessToken) {
+                const kw = pushConfig.dingtalk.keyword || 'MS-Rewards'
                 tasks.push(
                     sendDingTalk(
-                        `[${pushConfig.dingtalk.keyword || 'MS-Rewards'}] 🧪 测试推送\n仪表盘推送配置测试成功 ✅\n(${stamp})`
+                        kw + ' 测试推送',
+                        `### 🧪 ${kw} 测试推送\n\n- 仪表盘推送配置测试成功 ✅\n- ${stamp}`
                     ).then(r => ({ channel: '钉钉', ok: r.ok, error: r.error || (r.resp ? r.resp.slice(0, 120) : '') }))
                 )
             }
@@ -3403,6 +3476,7 @@ const HTML = `<!DOCTYPE html>
     </div>
     <div>
       <div class="switch-row"><span>🚀 开始运行</span><label class="switch"><input type="checkbox" id="ev-runStart"><span class="slider"></span></label></div>
+      <div class="switch-row"><span>▶ 账号开始（每个账号开跑时推送）</span><label class="switch"><input type="checkbox" id="ev-accountStart"><span class="slider"></span></label></div>
       <div class="switch-row"><span>✅ 全部完成</span><label class="switch"><input type="checkbox" id="ev-runEnd"><span class="slider"></span></label></div>
       <div class="switch-row"><span>👤 账号完成</span><label class="switch"><input type="checkbox" id="ev-accountEnd"><span class="slider"></span></label></div>
       <div class="switch-row"><span>❌ 错误</span><label class="switch"><input type="checkbox" id="ev-error"><span class="slider"></span></label></div>
@@ -4415,6 +4489,7 @@ function loadPushForm(c) {
   $('ddDedup').value = c.dedupSeconds != null ? c.dedupSeconds : 10;
   $('ddEnabled').checked = dd.enabled !== false;
   $('ev-runStart').checked = !(ev.runStart && ev.runStart.enabled === false);
+  $('ev-accountStart').checked = !(ev.accountStart && ev.accountStart.enabled === false);
   $('ev-runEnd').checked = !(ev.runEnd && ev.runEnd.enabled === false);
   $('ev-accountEnd').checked = !(ev.accountEnd && ev.accountEnd.enabled === false);
   $('ev-error').checked = !(ev.error && ev.error.enabled === false);
@@ -4441,6 +4516,7 @@ function collectPush() {
     },
     events: {
       runStart: { enabled: $('ev-runStart').checked },
+      accountStart: { enabled: $('ev-accountStart').checked },
       runEnd: { enabled: $('ev-runEnd').checked },
       accountEnd: { enabled: $('ev-accountEnd').checked },
       error: { enabled: $('ev-error').checked },

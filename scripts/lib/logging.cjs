@@ -49,6 +49,9 @@ function writeConsoleLog(level, line, color) {
 
 function sanitizeLogMessage(message) {
     return message
+        // Patchright/Playwright 错误常附带整个浏览器控制台日志(数万字符), 剥离尾部噪音,
+        // 保留主错误行(此前曾把 33KB 事件行塞进推送并破坏事件 JSON 解析)
+        .replace(/\n?Browser logs:\n[\s\S]*$/, '')
         .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[redacted]@')
         .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 [redacted]')
         .replace(/(\b(?:Cookie|Set-Cookie)\s*:\s*)[^\r\n|]*/gi, '$1[redacted]')
