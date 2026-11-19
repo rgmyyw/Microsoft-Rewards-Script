@@ -84,6 +84,9 @@ function loadPushConfig() {
         pushConfig = defaultPushConfig()
         savePushConfig()
     }
+    // 迁移: 新增事件开关合并默认值(旧配置文件缺键时不丢功能)
+    const def = defaultPushConfig()
+    pushConfig.events = { ...def.events, ...(pushConfig.events || {}) }
 }
 function savePushConfig() {
     pushConfig.updatedAt = new Date().toISOString()
