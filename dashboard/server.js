@@ -4078,11 +4078,8 @@ function renderRunPool(run) {
   for (var j = 0; j < pool.length; j++) {
     var em = pool[j];
     if (seen[em]) continue;
-    if (skipped.indexOf(em) >= 0) {
-      pendRows.push('<span style="color:#bbb;text-decoration:line-through">' + esc(em) + '（已移除）' +
-        ' <button style="font-size:11px;padding:0 6px;cursor:pointer;border:1px solid #cde;border-radius:4px;background:#fff;color:#1a5fb4" onclick="poolAdd(&quot;' + esc(em) + '&quot;, this)">恢复</button></span>');
-      continue;
-    }
+    // 已移除: 从池消失, 可在下方"添加"区点 + 加回
+    if (skipped.indexOf(em) >= 0) continue;
     pendRows.push('<span>' + esc(em) +
       ' <button style="font-size:11px;padding:0 6px;cursor:pointer;border:1px solid #ddd;border-radius:4px;background:#fff;color:#c0392b" onclick="poolSkip(&quot;' + esc(em) + '&quot;)">移除</button></span>');
   }
@@ -4091,13 +4088,13 @@ function renderRunPool(run) {
     html += '<div style="margin-bottom:8px"><div style="color:#666;font-size:12px;margin-bottom:3px">⏳ 待执行池（' + pendRows.length + '）</div>' +
       pendRows.join('<br>') + '</div>';
   }
-  // ---- 追加: 只有不在本轮池的账号才出芯片 ----
+  // ---- 添加: 不在本轮池的账号(含刚被移除的)都出芯片, 点击即加回 ----
   var inBatch = {};
   for (var m = 0; m < pool.length; m++) inBatch[pool[m]] = true;
   var addable = [];
   for (var n = 0; n < accountsCache.length; n++) {
     var em2 = accountsCache[n].email;
-    if (!inBatch[em2]) addable.push(em2);
+    if (!inBatch[em2] || skipped.indexOf(em2) >= 0) addable.push(em2);
   }
   if (addable.length) {
     var chips = addable.map(function (e2) {
@@ -4108,7 +4105,7 @@ function renderRunPool(run) {
   // ---- 失败 / 部分完成 / 已完成 分区 ----
   var poolHtml = '';
   if (pendRows.length) {
-    poolHtml += '<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px"><div style="color:#666;font-size:12px;margin-bottom:3px">📋 队列池（' + pendRows.length + '，执行顺序随机；移除可跳过，恢复可加回）</div>' + pendRows.join('<br>') + '</div>';
+    poolHtml += '<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px"><div style="color:#666;font-size:12px;margin-bottom:3px">📋 队列池（' + pendRows.length + '，执行顺序随机）</div>' + pendRows.join('<br>') + '</div>';
   }
   if (partRows.length) {
     poolHtml += '<div style="margin-bottom:8px"><div style="color:#9aa;font-size:12px;margin-bottom:3px">◐ 部分完成（' + partRows.length + '，主任务已跑，个别任务不适用）</div>' + partRows.join('<br>') + '</div>';
