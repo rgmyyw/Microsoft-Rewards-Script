@@ -4076,7 +4076,8 @@ function renderRunPool(run) {
     var em = pool[j];
     if (seen[em]) continue;
     if (skipped.indexOf(em) >= 0) {
-      pendRows.push('<span style="color:#bbb;text-decoration:line-through">' + esc(em) + '（已移除）</span>');
+      pendRows.push('<span style="color:#bbb;text-decoration:line-through">' + esc(em) + '（已移除）' +
+        ' <button style="font-size:11px;padding:0 6px;cursor:pointer;border:1px solid #cde;border-radius:4px;background:#fff;color:#1a5fb4" onclick="poolAdd(&quot;' + esc(em) + '&quot;, this)">恢复</button></span>');
       continue;
     }
     pendRows.push('<span>' + esc(em) +
@@ -4123,11 +4124,14 @@ function renderRunPool(run) {
     poolHtml += '<div><div style="color:#666;font-size:12px;margin-bottom:3px">✅ 已完成（' + doneRows.length + '）</div>' + doneRows.join('<br>') + '</div>';
   }
   el.innerHTML = poolHtml || '<div style="color:#999;font-size:12px">队列池为空（全部账号已完成）</div>';
-  refreshRunPool();
+  refreshRunPool(run);
 }
-function refreshRunPool() {
+function refreshRunPool(run) {
   apiFetch(API.runPool, null, 5000).then(function (s) {
-    runPoolCache = s || { skipEmails: [], addEmails: [] };
+    var next = s || { skipEmails: [], addEmails: [] };
+    var changed = JSON.stringify(next) !== JSON.stringify(runPoolCache);
+    runPoolCache = next;
+    if (changed && run && run.running) renderRunPool(run);
   }).catch(function () { });
 }
 
