@@ -342,6 +342,14 @@ function cardMd(icon, heading, fields) {
 }
 
 function pushForEntry(rawEntry) {
+  try {
+    pushForEntryInner(rawEntry)
+  } catch (e) {
+    // 推送/统计异常不得崩掉 dashboard 主进程(曾因后端引用前端变量导致整进程崩溃)
+    try { log('ERROR', '推送处理异常: ' + (e && e.message)) } catch (_) { }
+  }
+}
+function pushForEntryInner(rawEntry) {
     // SSE 带 replay=200 重连: 重启/断线会把旧事件当新事件再推一遍(曾把 8 小时前的
     // 旧错误推给用户)。只推送本进程启动之后产生的事件; replay 仅用于重建状态
     const ts = Date.parse(rawEntry && rawEntry.ts)
@@ -363,7 +371,7 @@ function pushForEntry(rawEntry) {
         key = 'runStart'
         const accounts = extractField(message, /Accounts:\s*(\d+)/)
         // 本轮账号列表: 启动时记录的计划集合(选定账号启动), 全量启动用账号全集
-        const plan = state.currentRunPlan && state.currentRunPlan.length ? state.currentRunPlan : accountsCache.map(a => a.email)
+        const plan = state.currentRunPlan && state.currentRunPlan.length ? state.currentRunPlan : Object.keys(state.accounts || {})
         const names = plan.map((e, i) => `${i + 1}. ${e}`).join('\n')
         fields = [`📊 本轮共 **${accounts ?? plan.length}** 个账号（执行顺序随机）`, `📋 账号清单:\n${names || '（账号列表待定）'}`]
         heading = '开始运行'
@@ -2501,7 +2509,9 @@ const server = http.createServer(async (req, res) => {
                 }
             }
             // 记录本轮计划账号集合: 运行条队列只显示本轮参与者(未启动的为排队)
+            // 立即落盘: dashboard 崩溃重启后 loadState 恢复的必须是新计划而非上一轮旧值
             state.currentRunPlan = planEmails
+            saveState()
             return proxyContainerApi('/start', 'POST', payload, res)
         }
         if (p === '/api/stop' && req.method === 'POST') {
