@@ -4114,9 +4114,6 @@ function renderRunPool(run) {
   el.innerHTML = poolHtml || '<div style="color:#999;font-size:12px">队列池为空（全部账号已完成）</div>';
   refreshRunPool(run);
 }
-  el.innerHTML = poolHtml || '<div style="color:#999;font-size:12px">队列池为空（全部账号已完成）</div>';
-  refreshRunPool(run);
-}
 function refreshRunPool(run) {
   apiFetch(API.runPool, null, 5000).then(function (s) {
     var next = s || { skipEmails: [], addEmails: [] };
